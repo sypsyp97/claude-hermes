@@ -100,4 +100,27 @@ describe("plugin install-time contract", () => {
       expect(scripts[m[1]], `hook "${hook}" references missing package.json script "${m[1]}"`).toBeDefined();
     }
   });
+
+  test("AGENTS.md exists and pins the agent contract sections", async () => {
+    // AGENTS.md is the entry point for autonomous agents. Renaming sections
+    // breaks discovery for evolve loops and third-party agent SDKs that index
+    // by header. If a real edit needs new headers, update both this test and
+    // any agents that grep for them.
+    const text = await readFile(join(REPO_ROOT, "AGENTS.md"), "utf8");
+    const requiredSections = [
+      "## Quickstart",
+      "## The verify pipeline",
+      "## Test conventions",
+      "## Hard rules",
+      "## Where things live",
+      "## Self-evolution loop",
+    ];
+    const missing = requiredSections.filter((s) => !text.includes(s));
+    expect(missing).toEqual([]);
+  });
+
+  test(".github/pull_request_template.md exists and references the verify pipeline", async () => {
+    const text = await readFile(join(REPO_ROOT, ".github", "pull_request_template.md"), "utf8");
+    expect(text).toContain("bun run verify");
+  });
 });

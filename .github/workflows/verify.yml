@@ -39,3 +39,14 @@ jobs:
 
       - name: Verify (typecheck + lint + unit + smoke + integration)
         run: bun run verify
+
+      - name: Coverage report
+        if: matrix.os == 'ubuntu-latest' && matrix.bun == '1.3.4'
+        run: |
+          {
+            echo "## Coverage (\`bun test src --coverage\`)"
+            echo ""
+            echo '```'
+            bun test src --coverage 2>&1 | tail -120 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
