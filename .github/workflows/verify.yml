@@ -21,14 +21,5 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Lint
-        run: bun run lint
-
-      - name: Unit tests
-        run: bun run test
-
-      - name: Smoke tests
-        run: bun run test:smoke
+      - name: Verify (typecheck + lint + unit + smoke + integration)
+        run: bun run verify

@@ -72,6 +72,7 @@ const CLAUDECLAW_ALLOWLIST: ReadonlySet<string> = new Set([
   "migrate/legacy.ts",
   "state/import-json.ts", // one-shot legacy-JSON importer
   "commands/start.ts", // user-facing migration log messages
+  "runner.test.ts", // tests the legacy-marker rewrite behavior in ensureProjectClaudeMd
 ]);
 
 async function walkTs(dir: string, out: string[]): Promise<void> {
