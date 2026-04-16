@@ -54,7 +54,7 @@ const DEFAULT_SETTINGS: Settings = {
   },
   telegram: { token: "", allowedUserIds: [] },
   discord: { token: "", allowedUserIds: [], listenChannels: [] },
-  security: { level: "moderate", allowedTools: [], disallowedTools: [] },
+  security: { level: "moderate", allowedTools: [], disallowedTools: [], bypassPermissions: false },
   stt: { baseUrl: "", model: "" },
   plugins: { preflightOnStart: false },
 };
@@ -94,6 +94,13 @@ export interface SecurityConfig {
   level: SecurityLevel;
   allowedTools: string[];
   disallowedTools: string[];
+  /**
+   * Pass `--dangerously-skip-permissions` to the Claude CLI. This suppresses
+   * every interactive permission prompt and is required for unattended
+   * operation, but it also removes the last safety net if the model decides
+   * to run something destructive. Off by default — opt in consciously.
+   */
+  bypassPermissions: boolean;
 }
 
 export interface Settings {
@@ -269,6 +276,7 @@ function parseSettings(raw: Record<string, any>, discordUserIdsRaw: string[] = [
       disallowedTools: Array.isArray(raw.security?.disallowedTools)
         ? raw.security.disallowedTools
         : [],
+      bypassPermissions: raw.security?.bypassPermissions === true,
     },
     stt: {
       baseUrl: typeof raw.stt?.baseUrl === "string" ? raw.stt.baseUrl.trim() : "",

@@ -375,29 +375,53 @@ export async function ensureProjectClaudeMd(): Promise<void> {
   }
 }
 
-function buildSecurityArgs(security: SecurityConfig): string[] {
-  const args: string[] = ["--dangerously-skip-permissions"];
+/**
+ * Translate a `SecurityConfig` into the Claude CLI flags that enforce it.
+ *
+ * Contract:
+ *  - `--dangerously-skip-permissions` is only emitted when the caller set
+ *    `bypassPermissions: true`. It is no longer unconditional — hermes has
+ *    to opt into the nuclear option explicitly.
+ *  - `allowedTools` / `disallowedTools` are emitted as comma-joined lists
+ *    (`Read,Grep,Glob`), not space-joined. Space-joined lists are silently
+ *    treated by the CLI as a single tool name and fail closed / open
+ *    depending on the flag, which is exactly the kind of silent-failure we
+ *    are trying to remove.
+ *  - `level` provides the default tool surface for each posture:
+ *     locked     → `--allowedTools Read,Grep,Glob`
+ *     strict     → `--disallowedTools Bash,WebSearch,WebFetch`
+ *     moderate   → no tool constraint (directory scope comes from the
+ *                  system prompt the caller already appends)
+ *     unrestricted → nothing
+ *  - Caller-supplied `allowedTools` / `disallowedTools` arrays are appended
+ *    in addition to the level defaults.
+ */
+export function buildSecurityArgs(security: SecurityConfig): string[] {
+  const args: string[] = [];
+  if (security.bypassPermissions) {
+    args.push("--dangerously-skip-permissions");
+  }
 
   switch (security.level) {
     case "locked":
-      args.push("--tools", "Read,Grep,Glob");
+      args.push("--allowedTools", "Read,Grep,Glob");
       break;
     case "strict":
       args.push("--disallowedTools", "Bash,WebSearch,WebFetch");
       break;
     case "moderate":
-      // all tools available, scoped to project dir via system prompt
+      // Tool surface open; directory scoping comes from the appended system
+      // prompt at the caller.
       break;
     case "unrestricted":
-      // all tools, no directory restriction
       break;
   }
 
   if (security.allowedTools.length > 0) {
-    args.push("--allowedTools", security.allowedTools.join(" "));
+    args.push("--allowedTools", security.allowedTools.join(","));
   }
   if (security.disallowedTools.length > 0) {
-    args.push("--disallowedTools", security.disallowedTools.join(" "));
+    args.push("--disallowedTools", security.disallowedTools.join(","));
   }
 
   return args;
