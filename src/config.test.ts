@@ -43,21 +43,57 @@ describe("resolvePrompt", () => {
     expect(await config.resolvePrompt("hello world")).toBe("hello world");
   });
 
-  test("falls back to trimmed literal when .md path does not exist", async () => {
-    // "some.md" ends with a prompt extension → config will try to read it,
-    // fail, and gracefully return the trimmed literal string.
+  test("does NOT treat plain prose ending in '.md' as a file path", async () => {
+    // Old implementation would silently try to read "some-file.md" from cwd.
+    // New contract: only the explicit @file: prefix triggers a read.
+    expect(await config.resolvePrompt("see some-file.md for details")).toBe("see some-file.md for details");
+  });
+
+  test("does NOT treat a bare 'some.md' string as a file path", async () => {
+    // Without the @file: prefix this is a literal, even if it happens to look
+    // like a path.
     expect(await config.resolvePrompt("  some.md  ")).toBe("some.md");
   });
 
-  test("reads prompt file contents when .md path exists", async () => {
+  test("reads prompt file contents only when the @file: prefix is used", async () => {
     const fixtureRel = "fixture.md";
     const fixtureAbs = join(TEMP_DIR, fixtureRel);
     await writeFile(fixtureAbs, "prompt body");
     try {
-      expect(await config.resolvePrompt(`./${fixtureRel}`)).toBe("prompt body");
+      expect(await config.resolvePrompt(`@file:${fixtureRel}`)).toBe("prompt body");
     } finally {
       await rm(fixtureAbs, { force: true });
     }
+  });
+
+  test("rejects absolute paths under @file: — refuses to read outside cwd", async () => {
+    const fixtureAbs = join(TEMP_DIR, "abs-fixture.md");
+    await writeFile(fixtureAbs, "should not be read");
+    try {
+      // Absolute paths (even ones that happen to resolve inside cwd) are not
+      // accepted — the caller cannot bypass directory scoping with an absolute.
+      const result = await config.resolvePrompt(`@file:${fixtureAbs}`);
+      expect(result).not.toBe("should not be read");
+      expect(result).toContain("@file:");
+    } finally {
+      await rm(fixtureAbs, { force: true });
+    }
+  });
+
+  test("rejects paths containing `..` segments", async () => {
+    const result = await config.resolvePrompt("@file:../escape.md");
+    expect(result).toContain("@file:");
+  });
+
+  test("rejects paths that resolve outside cwd even without a literal '..'", async () => {
+    // Construct a path that tries to escape via trailing ../ after a segment.
+    const sneaky = "@file:legit/../../escape.md";
+    const result = await config.resolvePrompt(sneaky);
+    expect(result).toContain("@file:");
+  });
+
+  test("missing file under @file: falls back to the trimmed literal", async () => {
+    expect(await config.resolvePrompt("@file:does-not-exist.md")).toBe("@file:does-not-exist.md");
   });
 });
 

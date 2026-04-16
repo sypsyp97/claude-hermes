@@ -1,4 +1,4 @@
-import { join, isAbsolute } from "path";
+import { isAbsolute, relative, resolve } from "path";
 import { mkdir } from "fs/promises";
 import { existsSync } from "fs";
 import { normalizeTimezoneName, resolveTimezoneOffsetMinutes } from "./timezone";
@@ -340,26 +340,49 @@ export function getSettings(): Settings {
   return cached;
 }
 
-const PROMPT_EXTENSIONS = [".md", ".txt", ".prompt"];
+const PROMPT_FILE_PREFIX = "@file:";
 
 /**
- * If the prompt string looks like a file path (ends with .md, .txt, or .prompt),
- * read and return the file contents. Otherwise return the string as-is.
- * Relative paths are resolved from the project root (cwd).
+ * If the prompt string starts with the explicit `@file:` prefix, read the
+ * referenced file (relative to cwd) and return its trimmed contents. Any
+ * other string — including prose that incidentally ends in `.md`, `.txt`, or
+ * `.prompt` — is returned literally.
+ *
+ * Guardrails: absolute paths are rejected, and resolved paths must remain
+ * strictly under cwd (no `..` escapes). When the prefix is present but the
+ * path is rejected or missing, the literal trimmed string is returned and a
+ * warning is logged.
  */
 export async function resolvePrompt(prompt: string): Promise<string> {
   const trimmed = prompt.trim();
   if (!trimmed) return trimmed;
+  if (!trimmed.startsWith(PROMPT_FILE_PREFIX)) return trimmed;
 
-  const isPath = PROMPT_EXTENSIONS.some((ext) => trimmed.endsWith(ext));
-  if (!isPath) return trimmed;
+  const spec = trimmed.slice(PROMPT_FILE_PREFIX.length).trim();
+  if (!spec) {
+    console.warn("[config] @file: prompt reference had no path, using as literal string");
+    return trimmed;
+  }
+  if (isAbsolute(spec)) {
+    console.warn(`[config] refusing absolute prompt path "${spec}", using as literal string`);
+    return trimmed;
+  }
 
-  const resolved = isAbsolute(trimmed) ? trimmed : join(process.cwd(), trimmed);
+  const cwd = process.cwd();
+  const resolved = resolve(cwd, spec);
+  const rel = relative(cwd, resolved);
+  if (rel.startsWith("..") || isAbsolute(rel)) {
+    console.warn(
+      `[config] prompt path "${spec}" escapes project root, using as literal string`
+    );
+    return trimmed;
+  }
+
   try {
     const content = await Bun.file(resolved).text();
     return content.trim();
   } catch {
-    console.warn(`[config] Prompt path "${trimmed}" not found, using as literal string`);
+    console.warn(`[config] Prompt path "${spec}" not found, using as literal string`);
     return trimmed;
   }
 }
