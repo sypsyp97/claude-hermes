@@ -104,8 +104,15 @@ export async function evolveOnce(
 function defaultPrompt(task: EvolveTask): string {
   return [
     "You are Claude Hermes running inside its own repository.",
-    "Implement the following task.",
-    "Rules: minimal diff, no unrelated refactors, keep `bun run verify` green.",
+    "Your job this iteration: make the smallest set of code changes that make the task body below true, then exit.",
+    "",
+    "Rules:",
+    "- Only edit files needed to satisfy the task body. Do not rename, reformat, or restructure files the task does not mention.",
+    "- Do not delete or rewrite existing tests unless the task explicitly says so. If behavior changes, add new tests rather than editing unrelated ones.",
+    "- Do not upgrade or add dependencies unless the task body names the package and version.",
+    "- Do not modify files under `.github/`, `.claude/`, `scripts/verify.ts`, or any lockfile unless the task body names that exact path.",
+    "- After your edits, `bun run verify` must exit 0. If you cannot make it exit 0, revert your edits and exit non-zero instead of leaving the tree in a broken state.",
+    "- Do not run `git commit`, `git push`, `git tag`, or any network commands. The outer loop handles commit and revert.",
     "",
     `# Task ${task.id}`,
     `title: ${task.title}`,
