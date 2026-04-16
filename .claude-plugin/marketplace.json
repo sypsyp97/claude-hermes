@@ -1,15 +1,23 @@
 {
   "name": "claude-hermes",
   "owner": {
-    "name": "moazbuilds"
+    "name": "sypsyp97"
   },
   "plugins": [
     {
       "name": "claude-hermes",
       "source": "./",
-      "description": "Cron-like daemon that runs Claude prompts on a schedule",
+      "description": "Self-evolving Claude Code daemon — Telegram + Discord bridges, cron jobs, learned skills, SQLite state",
       "version": "1.0.0",
-      "keywords": ["cron", "heartbeat", "scheduler", "daemon"],
+      "keywords": [
+        "daemon",
+        "telegram",
+        "discord",
+        "cron",
+        "heartbeat",
+        "skills",
+        "self-evolving"
+      ],
       "category": "productivity"
     }
   ]

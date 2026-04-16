@@ -17,6 +17,20 @@ Claude Hermes turns your Claude Code into a personal assistant that never sleeps
 
 ## Install
 
+Easiest path — install from the Claude Code plugin marketplace. Inside any Claude Code session, run:
+
+```
+/plugin marketplace add sypsyp97/claudeclaw
+/plugin install claude-hermes@claude-hermes
+/claude-hermes:start
+```
+
+The setup wizard walks you through model, heartbeat, Telegram, Discord, and security; the daemon then runs in the background. Bun is the only runtime dependency — `start` will offer to install it for you if it's missing.
+
+If you previously ran the upstream Claw daemon in this workspace, the first `start` migrates `.claude/claudeclaw/` → `.claude/hermes/` once and then leaves the legacy directory untouched as a safety net.
+
+### Develop from source
+
 ```bash
 git clone https://github.com/sypsyp97/claudeclaw.git claude-hermes
 cd claude-hermes
@@ -24,15 +38,12 @@ bun install
 bun run verify
 ```
 
-Open a Claude Code session in the cloned directory and run:
+Then point Claude Code at the working tree:
 
 ```
-/claude-hermes:start
+/plugin marketplace add /absolute/path/to/claude-hermes
+/plugin install claude-hermes@claude-hermes
 ```
-
-The setup wizard walks you through model, heartbeat, Telegram, Discord, and security; the daemon then runs in the background.
-
-If you previously ran the upstream Claw daemon in this workspace, the first `start` migrates `.claude/claudeclaw/` → `.claude/hermes/` once and then leaves the legacy directory untouched as a safety net.
 
 ## Features
 
