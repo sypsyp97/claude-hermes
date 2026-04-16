@@ -27,12 +27,22 @@ export function sessionKeyFor({ envelope, scope }: SessionKeyInput): string {
       if (!envelope.thread) {
         throw new Error("sessionKeyFor: per-thread scope requires envelope.thread");
       }
-      return `thread:${envelope.source}:${envelope.thread}`;
+      return threadKey(envelope.source, envelope.thread);
     case "shared":
       return `shared:${envelope.source}:${envelope.guild ?? "_"}:${envelope.channel ?? "_"}`;
     case "workspace":
-      return `workspace:${hash(envelope.workspace)}`;
+      return workspaceKey(envelope.workspace);
   }
+}
+
+/** Low-level key builders — exported so the one-shot importer can emit keys
+ * that match the live router contract without fabricating an Envelope. */
+export function threadKey(source: string, thread: string): string {
+  return `thread:${source}:${thread}`;
+}
+
+export function workspaceKey(workspace: string): string {
+  return `workspace:${hash(workspace)}`;
 }
 
 function hash(input: string): string {
