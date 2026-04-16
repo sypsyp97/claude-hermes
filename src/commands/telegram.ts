@@ -883,7 +883,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       chatId,
       ...(threadId !== undefined && { threadId }),
     });
-    const result = await runUserMessage("telegram", prefixedPrompt, undefined, statusSink);
+    const result = await runUserMessage("telegram", prefixedPrompt, undefined, statusSink, "telegram");
 
     if (result.exitCode !== 0) {
       await sendMessage(config.token, chatId, `Error (exit ${result.exitCode}): ${result.stderr || "Unknown error"}`, threadId);
@@ -923,6 +923,23 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
 
 async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> {
   const config = getSettings().telegram;
+
+  // Fail-closed auth: an empty allowlist rejects everyone, and any
+  // non-allowlisted caller is rejected with a polite toast before we
+  // ever open a socket to the local secretary endpoint.
+  const fromId = query.from?.id;
+  if (
+    config.allowedUserIds.length === 0 ||
+    fromId === undefined ||
+    !config.allowedUserIds.includes(fromId)
+  ) {
+    await callApi(config.token, "answerCallbackQuery", {
+      callback_query_id: query.id,
+      text: "Unauthorized.",
+    }).catch(() => {});
+    return;
+  }
+
   const data = query.data ?? "";
 
   // Secretary pattern: "sec_yes_<8hex>" or "sec_no_<8hex>"
@@ -1020,7 +1037,7 @@ async function poll(): Promise<void> {
   }
 
   console.log("Telegram bot started (long polling)");
-  console.log(`  Allowed users: ${config.allowedUserIds.length === 0 ? "all" : config.allowedUserIds.join(", ")}`);
+  console.log(`  Allowed users: ${config.allowedUserIds.length === 0 ? "none (fail-closed)" : config.allowedUserIds.join(", ")}`);
   if (telegramDebug) console.log("  Debug: enabled");
 
   // Register available skills as bot command menu (non-blocking)

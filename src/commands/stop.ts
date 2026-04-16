@@ -2,24 +2,32 @@ import { writeFile, unlink, readdir, readFile } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
 import { getPidPath, cleanupPidFile } from "../pid";
-import { hermesDir, pidFile } from "../paths";
+import { claudeDir, hermesDir, pidFile } from "../paths";
 
-const CLAUDE_DIR = join(process.cwd(), ".claude");
-const HEARTBEAT_DIR = hermesDir();
-const STATUSLINE_FILE = join(CLAUDE_DIR, "statusline.cjs");
-const CLAUDE_SETTINGS_FILE = join(CLAUDE_DIR, "settings.json");
+// NOTE: these paths MUST be resolved lazily on every call. Capturing them at
+// module load would freeze them to whatever process.cwd() was when the module
+// was first imported — a footgun when the process chdir's between import and
+// teardown. See src/paths.ts for the same guidance.
+function statuslineFile(): string {
+  return join(claudeDir(), "statusline.cjs");
+}
+
+function claudeSettingsFile(): string {
+  return join(claudeDir(), "settings.json");
+}
 
 async function teardownStatusline() {
+  const settingsPath = claudeSettingsFile();
   try {
-    const settings = await Bun.file(CLAUDE_SETTINGS_FILE).json();
+    const settings = await Bun.file(settingsPath).json();
     delete settings.statusLine;
-    await writeFile(CLAUDE_SETTINGS_FILE, JSON.stringify(settings, null, 2) + "\n");
+    await writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
   } catch {
     // file doesn't exist, nothing to clean up
   }
 
   try {
-    await unlink(STATUSLINE_FILE);
+    await unlink(statuslineFile());
   } catch {
     // already gone
   }
@@ -46,7 +54,7 @@ export async function stop() {
   await teardownStatusline();
 
   try {
-    await unlink(join(HEARTBEAT_DIR, "state.json"));
+    await unlink(join(hermesDir(), "state.json"));
   } catch {
     // already gone
   }

@@ -15,14 +15,7 @@
       "src/paths.ts",
       "src/**/*.test.ts"
     ],
-    "ignore": [
-      "node_modules",
-      "dist",
-      "build",
-      ".claude",
-      "images",
-      "docs"
-    ]
+    "ignore": ["node_modules", "dist", "build", ".claude", "images", "docs"]
   },
   "organizeImports": {
     "enabled": false

@@ -12,7 +12,6 @@ import {
 } from "../config";
 import { type Job, clearJobSchedule, loadJobs } from "../jobs";
 import { migrateIfNeeded } from "../migrate/legacy";
-import { bootstrapState, closeDb } from "../state";
 import { checkExistingDaemon, cleanupPidFile, writePidFile } from "../pid";
 import {
   bootstrap,
@@ -554,21 +553,6 @@ export async function start(args: string[] = []) {
     // Bootstrap the session first so system prompt is initial context
     // and session.json is created immediately.
     await bootstrap();
-  }
-
-  // Mirror any legacy JSON session state into the SQLite store so queries
-  // that go through state/repos see the same sessions the runner does.
-  // The importer is idempotent so running it on every boot is cheap.
-  try {
-    const bootstrap = await bootstrapState(process.cwd());
-    if (bootstrap.globalSessionImported || bootstrap.threadSessionsImported > 0) {
-      console.log(
-        `[${ts()}] State bootstrap: imported ${bootstrap.globalSessionImported ? "1 workspace" : "0 workspace"} + ${bootstrap.threadSessionsImported} thread session(s)`,
-      );
-    }
-    closeDb(bootstrap.db);
-  } catch (err) {
-    console.error(`[${ts()}] State bootstrap failed:`, err);
   }
 
   // Plugin preflight is opt-in: it clones third-party repos and runs
