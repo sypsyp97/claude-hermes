@@ -72,6 +72,24 @@ describe("loadJobs", () => {
     expect(jobs).toHaveLength(0);
   });
 
+  test("skips jobs with an invalid cron expression and logs the reason", async () => {
+    const original = console.error;
+    const errors: unknown[][] = [];
+    console.error = (...args: unknown[]) => {
+      errors.push(args);
+    };
+    try {
+      // 4 fields, not 5 — old code would let this through and crash updateState().
+      await writeFile(join(JOBS_DIR, "badcron.md"), `---\nschedule: "0 25 * *"\nrecurring: true\n---\nBody`);
+      const jobs = await loadJobs();
+      expect(jobs).toHaveLength(0);
+      const combined = errors.map((a) => a.join(" ")).join("\n");
+      expect(combined.toLowerCase()).toContain("badcron");
+    } finally {
+      console.error = original;
+    }
+  });
+
   test("treats legacy `daily: true` as recurring=true", async () => {
     await writeFile(join(JOBS_DIR, "legacy.md"), `---\nschedule: "0 9 * * *"\ndaily: true\n---\nLegacy body`);
     const jobs = await loadJobs();

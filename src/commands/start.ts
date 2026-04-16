@@ -1,7 +1,7 @@
 import { mkdir, unlink, writeFile } from "fs/promises";
 import { join } from "path";
 import { fileURLToPath } from "url";
-import { cronMatches, nextCronMatch } from "../cron";
+import { matchesBetween, nextCronMatch } from "../cron";
 import {
   type HeartbeatConfig,
   initConfig,
@@ -622,14 +622,23 @@ export async function start(args: string[] = []) {
   }, 30_000);
 
   // --- Cron tick (every 60s) ---
+  // Track the last minute-slot each job was evaluated against so a daemon
+  // sleep, clock skew, or blocked event loop doesn't drop a trigger.
+  const lastTickFor = new Map<string, Date>();
   function updateState() {
     const now = new Date();
+    const jobsState: { name: string; nextAt: number }[] = [];
+    for (const job of currentJobs) {
+      try {
+        const next = nextCronMatch(job.schedule, now, currentSettings.timezoneOffsetMinutes);
+        if (next) jobsState.push({ name: job.name, nextAt: next.getTime() });
+      } catch (err) {
+        console.error(`[${ts()}] Skipping ${job.name} in status: ${String(err)}`);
+      }
+    }
     const state: StateData = {
       heartbeat: currentSettings.heartbeat.enabled ? { nextAt: nextHeartbeatAt } : undefined,
-      jobs: currentJobs.map((job) => ({
-        name: job.name,
-        nextAt: nextCronMatch(job.schedule, now, currentSettings.timezoneOffsetMinutes).getTime(),
-      })),
+      jobs: jobsState,
       security: currentSettings.security.level,
       telegram: !!currentSettings.telegram.token,
       discord: !!currentSettings.discord.token,
@@ -643,7 +652,16 @@ export async function start(args: string[] = []) {
   setInterval(() => {
     const now = new Date();
     for (const job of currentJobs) {
-      if (cronMatches(job.schedule, now, currentSettings.timezoneOffsetMinutes)) {
+      try {
+        const since = lastTickFor.get(job.name) ?? new Date(now.getTime() - 60_000);
+        lastTickFor.set(job.name, now);
+        const hits = matchesBetween(
+          job.schedule,
+          since,
+          now,
+          currentSettings.timezoneOffsetMinutes,
+        );
+        if (hits.length === 0) continue;
         resolvePrompt(job.prompt)
           .then((prompt) => run(job.name, prompt))
           .then((r) => {
@@ -651,6 +669,9 @@ export async function start(args: string[] = []) {
             if (job.notify === "error" && r.exitCode === 0) return;
             forwardToTelegram(job.name, r);
             forwardToDiscord(job.name, r);
+          })
+          .catch((err) => {
+            console.error(`[${ts()}] Job ${job.name} failed:`, err);
           })
           .finally(async () => {
             if (job.recurring) return;
@@ -661,6 +682,8 @@ export async function start(args: string[] = []) {
               console.error(`[${ts()}] Failed to clear schedule for ${job.name}:`, err);
             }
           });
+      } catch (err) {
+        console.error(`[${ts()}] Cron tick error for ${job.name}:`, err);
       }
     }
     updateState();

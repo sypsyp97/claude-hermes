@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cronMatches, nextCronMatch } from "./cron";
+import { CronParseError, cronMatches, matchesBetween, nextCronMatch, parseCron } from "./cron";
 
 describe("cronMatches - exact minute/hour", () => {
   test("matches 12:30:00 UTC for '30 12 * * *'", () => {
@@ -132,12 +132,128 @@ describe("nextCronMatch", () => {
   test("midnight daily after 2026-04-16T12:00:00Z yields 2026-04-17T00:00:00Z", () => {
     const start = new Date(Date.UTC(2026, 3, 16, 12, 0, 0));
     const next = nextCronMatch("0 0 * * *", start);
-    expect(next.toISOString()).toBe("2026-04-17T00:00:00.000Z");
+    expect(next?.toISOString()).toBe("2026-04-17T00:00:00.000Z");
   });
 
   test("midnight daily in UTC-5 after 2026-04-16T12:00:00Z yields 2026-04-17T05:00:00Z", () => {
     const start = new Date(Date.UTC(2026, 3, 16, 12, 0, 0));
     const next = nextCronMatch("0 0 * * *", start, -300);
-    expect(next.toISOString()).toBe("2026-04-17T05:00:00.000Z");
+    expect(next?.toISOString()).toBe("2026-04-17T05:00:00.000Z");
+  });
+
+  test("monthly '0 0 1 * *' at 2026-04-16T12:00 yields 2026-05-01T00:00 (beyond old 48h window)", () => {
+    const start = new Date(Date.UTC(2026, 3, 16, 12, 0, 0));
+    const next = nextCronMatch("0 0 1 * *", start);
+    expect(next?.toISOString()).toBe("2026-05-01T00:00:00.000Z");
+  });
+
+  test("yearly '0 0 1 1 *' at 2026-04-16T12:00 yields 2027-01-01T00:00", () => {
+    const start = new Date(Date.UTC(2026, 3, 16, 12, 0, 0));
+    const next = nextCronMatch("0 0 1 1 *", start);
+    expect(next?.toISOString()).toBe("2027-01-01T00:00:00.000Z");
+  });
+
+  test("unsatisfiable schedule returns null, not an arbitrary date", () => {
+    // Hour 25 is never valid — parseCron will reject, so nextCronMatch throws.
+    // For a genuinely unsatisfiable but syntactically-valid expression use
+    // day-30 in February: '0 0 30 2 *' matches nothing.
+    const start = new Date(Date.UTC(2026, 0, 1, 0, 0, 0));
+    const next = nextCronMatch("0 0 30 2 *", start);
+    expect(next).toBeNull();
+  });
+});
+
+describe("parseCron", () => {
+  test("accepts a valid 5-field expression", () => {
+    const fields = parseCron("30 12 * * *");
+    expect(fields).toBeDefined();
+  });
+
+  test("throws CronParseError on 4 fields", () => {
+    expect(() => parseCron("30 12 * *")).toThrow(CronParseError);
+  });
+
+  test("throws CronParseError on 6 fields", () => {
+    expect(() => parseCron("* 30 12 * * *")).toThrow(CronParseError);
+  });
+
+  test("throws CronParseError on hour 25", () => {
+    expect(() => parseCron("0 25 * * *")).toThrow(CronParseError);
+  });
+
+  test("throws CronParseError on minute 60", () => {
+    expect(() => parseCron("60 0 * * *")).toThrow(CronParseError);
+  });
+
+  test("throws CronParseError on day-of-month 0", () => {
+    expect(() => parseCron("0 0 0 * *")).toThrow(CronParseError);
+  });
+
+  test("throws CronParseError on month 13", () => {
+    expect(() => parseCron("0 0 1 13 *")).toThrow(CronParseError);
+  });
+
+  test("throws CronParseError on day-of-week 7 (valid range is 0-6)", () => {
+    expect(() => parseCron("0 0 * * 7")).toThrow(CronParseError);
+  });
+
+  test("throws CronParseError on garbage inside a field", () => {
+    expect(() => parseCron("abc * * * *")).toThrow(CronParseError);
+  });
+
+  test("accepts step in every numeric field", () => {
+    expect(() => parseCron("*/5 */2 * * *")).not.toThrow();
+  });
+
+  test("throws CronParseError on empty string", () => {
+    expect(() => parseCron("")).toThrow(CronParseError);
+  });
+
+  test("throws CronParseError on pure whitespace", () => {
+    expect(() => parseCron("   \t  ")).toThrow(CronParseError);
+  });
+});
+
+describe("cronMatches surface does not crash on invalid input", () => {
+  test("cronMatches returns false (not throws) on a malformed expression", () => {
+    // Old code threw TypeError because splitting undefined fields.
+    // New contract: cronMatches swallows and returns false so callers never
+    // blow up statusline/updateState.
+    const d = new Date(Date.UTC(2026, 3, 16, 0, 0, 0));
+    expect(cronMatches("not a cron", d)).toBe(false);
+  });
+
+  test("nextCronMatch throws on malformed expression (caller must validate)", () => {
+    // Scheduler entry-point validates via parseCron; nextCronMatch is allowed
+    // to throw so bad configs surface loudly instead of silently drifting.
+    const d = new Date(Date.UTC(2026, 3, 16, 0, 0, 0));
+    expect(() => nextCronMatch("nope", d)).toThrow(CronParseError);
+  });
+});
+
+describe("matchesBetween — catch-up window", () => {
+  test("returns every minute that matches between (from, to]", () => {
+    // Every 15 minutes between 10:00 (exclusive) and 10:45 (inclusive).
+    const from = new Date(Date.UTC(2026, 3, 16, 10, 0, 0));
+    const to = new Date(Date.UTC(2026, 3, 16, 10, 45, 0));
+    const hits = matchesBetween("*/15 * * * *", from, to);
+    expect(hits.map((d) => d.toISOString())).toEqual([
+      "2026-04-16T10:15:00.000Z",
+      "2026-04-16T10:30:00.000Z",
+      "2026-04-16T10:45:00.000Z",
+    ]);
+  });
+
+  test("returns an empty array if from >= to", () => {
+    const t = new Date(Date.UTC(2026, 3, 16, 10, 0, 0));
+    expect(matchesBetween("* * * * *", t, t)).toEqual([]);
+  });
+
+  test("caps the scan at ~24h to protect against clock-skew abuse", () => {
+    const from = new Date(Date.UTC(2026, 3, 16, 10, 0, 0));
+    const to = new Date(Date.UTC(2027, 3, 16, 10, 0, 0)); // 1 year later
+    const hits = matchesBetween("* * * * *", from, to);
+    // Should not return 525k results; hard cap keeps it safe.
+    expect(hits.length).toBeLessThanOrEqual(24 * 60 + 1);
   });
 });

@@ -1,5 +1,6 @@
 import { readdir } from "fs/promises";
 import { join } from "path";
+import { CronParseError, parseCron } from "./cron";
 import { jobsDir } from "./paths";
 
 export interface Job {
@@ -31,6 +32,13 @@ function parseJobFile(name: string, content: string): Job | null {
   }
 
   const schedule = parseFrontmatterValue(scheduleLine.replace("schedule:", ""));
+  try {
+    parseCron(schedule);
+  } catch (err) {
+    const detail = err instanceof CronParseError ? err.message : String(err);
+    console.error(`Skipping job ${name}: ${detail}`);
+    return null;
+  }
 
   const recurringLine = lines.find((l) => l.startsWith("recurring:"));
   const dailyLine = lines.find((l) => l.startsWith("daily:")); // legacy alias
