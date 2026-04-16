@@ -2,11 +2,7 @@ import { join, isAbsolute } from "path";
 import { mkdir } from "fs/promises";
 import { existsSync } from "fs";
 import { normalizeTimezoneName, resolveTimezoneOffsetMinutes } from "./timezone";
-
-const HEARTBEAT_DIR = join(process.cwd(), ".claude", "claudeclaw");
-const SETTINGS_FILE = join(HEARTBEAT_DIR, "settings.json");
-const JOBS_DIR = join(HEARTBEAT_DIR, "jobs");
-const LOGS_DIR = join(HEARTBEAT_DIR, "logs");
+import { hermesDir, settingsFile, jobsDir, logsDir } from "./paths";
 
 const DEFAULT_SETTINGS: Settings = {
   model: "",
@@ -59,7 +55,6 @@ const DEFAULT_SETTINGS: Settings = {
   telegram: { token: "", allowedUserIds: [] },
   discord: { token: "", allowedUserIds: [], listenChannels: [] },
   security: { level: "moderate", allowedTools: [], disallowedTools: [] },
-  web: { enabled: false, host: "127.0.0.1", port: 4632 },
   stt: { baseUrl: "", model: "" },
 };
 
@@ -111,7 +106,6 @@ export interface Settings {
   telegram: TelegramConfig;
   discord: DiscordConfig;
   security: SecurityConfig;
-  web: WebConfig;
   stt: SttConfig;
 }
 
@@ -133,15 +127,9 @@ export interface ModelConfig {
   api: string;
 }
 
-export interface WebConfig {
-  enabled: boolean;
-  host: string;
-  port: number;
-}
-
 export interface SttConfig {
   /** Base URL of an OpenAI-compatible STT API, e.g. "http://127.0.0.1:8000".
-   *  When set, claudeclaw routes voice transcription through this API instead
+   *  When set, the daemon routes voice transcription through this API instead
    *  of the bundled whisper.cpp binary. */
   baseUrl: string;
   /** Model name passed to the API (default: "Systran/faster-whisper-large-v3") */
@@ -151,12 +139,12 @@ export interface SttConfig {
 let cached: Settings | null = null;
 
 export async function initConfig(): Promise<void> {
-  await mkdir(HEARTBEAT_DIR, { recursive: true });
-  await mkdir(JOBS_DIR, { recursive: true });
-  await mkdir(LOGS_DIR, { recursive: true });
+  await mkdir(hermesDir(), { recursive: true });
+  await mkdir(jobsDir(), { recursive: true });
+  await mkdir(logsDir(), { recursive: true });
 
-  if (!existsSync(SETTINGS_FILE)) {
-    await Bun.write(SETTINGS_FILE, JSON.stringify(DEFAULT_SETTINGS, null, 2) + "\n");
+  if (!existsSync(settingsFile())) {
+    await Bun.write(settingsFile(), JSON.stringify(DEFAULT_SETTINGS, null, 2) + "\n");
   }
 }
 
@@ -217,7 +205,7 @@ function parseAgenticConfig(raw: any): AgenticConfig {
   };
 }
 
-function parseSettings(raw: Record<string, any>): Settings {
+function parseSettings(raw: Record<string, any>, discordUserIdsRaw: string[] = []): Settings {
   const rawLevel = raw.security?.level;
   const level: SecurityLevel =
     typeof rawLevel === "string" && VALID_LEVELS.has(rawLevel as SecurityLevel)
@@ -249,7 +237,12 @@ function parseSettings(raw: Record<string, any>): Settings {
     },
     discord: {
       token: typeof raw.discord?.token === "string" ? raw.discord.token.trim() : "",
-      allowedUserIds: Array.isArray(raw.discord?.allowedUserIds)
+      // Snowflake IDs > 2^53 lose precision under JSON.parse. Prefer the raw
+      // string list regex'd out of the source text when available; fall back
+      // to the numeric array so tests that inject settings in-memory still work.
+      allowedUserIds: discordUserIdsRaw.length > 0
+        ? discordUserIdsRaw
+        : Array.isArray(raw.discord?.allowedUserIds)
           ? raw.discord.allowedUserIds.map(String)
           : [],
       listenChannels: Array.isArray(raw.discord?.listenChannels)
@@ -264,11 +257,6 @@ function parseSettings(raw: Record<string, any>): Settings {
       disallowedTools: Array.isArray(raw.security?.disallowedTools)
         ? raw.security.disallowedTools
         : [],
-    },
-    web: {
-      enabled: raw.web?.enabled ?? false,
-      host: raw.web?.host ?? "127.0.0.1",
-      port: Number.isFinite(raw.web?.port) ? Number(raw.web.port) : 4632,
     },
     stt: {
       baseUrl: typeof raw.stt?.baseUrl === "string" ? raw.stt.baseUrl.trim() : "",
@@ -333,7 +321,7 @@ function extractDiscordUserIds(rawText: string): string[] {
 
 export async function loadSettings(): Promise<Settings> {
   if (cached) return cached;
-  const rawText = await Bun.file(SETTINGS_FILE).text();
+  const rawText = await Bun.file(settingsFile()).text();
   const raw = JSON.parse(rawText);
   cached = parseSettings(raw, extractDiscordUserIds(rawText));
   return cached;
@@ -341,7 +329,7 @@ export async function loadSettings(): Promise<Settings> {
 
 /** Re-read settings from disk, bypassing cache. */
 export async function reloadSettings(): Promise<Settings> {
-  const rawText = await Bun.file(SETTINGS_FILE).text();
+  const rawText = await Bun.file(settingsFile()).text();
   const raw = JSON.parse(rawText);
   cached = parseSettings(raw, extractDiscordUserIds(rawText));
   return cached;

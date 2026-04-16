@@ -10,7 +10,7 @@ Parse `$ARGUMENTS` to identify what the user wants. If no arguments are given, s
 
 ### `show` (default when no arguments)
 
-1. Read `.claude/claudeclaw/settings.json`.
+1. Read `.claude/hermes/settings.json`.
 2. Display all settings clearly:
 
    **General**
@@ -36,18 +36,14 @@ Parse `$ARGUMENTS` to identify what the user wants. If no arguments are given, s
    - Allowed tools: (list or "default")
    - Disallowed tools: (list or "none")
 
-   **Web UI**
-   - Enabled: yes/no
-   - Address: host:port
-
-3. Also list any cron jobs from `.claude/claudeclaw/jobs/` with their name and schedule.
+3. Also list any cron jobs from `.claude/hermes/jobs/` with their name and schedule.
 4. Remind the user that changes are hot-reloaded every 30s — no daemon restart needed.
 
 ### `heartbeat on` / `heartbeat off` / `heartbeat enable` / `heartbeat disable`
 
 Toggle the heartbeat on or off.
 
-1. Read `.claude/claudeclaw/settings.json`.
+1. Read `.claude/hermes/settings.json`.
 2. Set `heartbeat.enabled` to `true` or `false` based on the command.
 3. Write the updated settings back.
 4. Confirm the change.
@@ -57,7 +53,7 @@ Toggle the heartbeat on or off.
 Change the heartbeat interval.
 
 1. Parse the number of minutes from `$ARGUMENTS`. If not provided or invalid, use **AskUserQuestion**: "How often should the heartbeat run?" (header: "Interval", options: "5 minutes", "15 minutes (Recommended)", "30 minutes", "60 minutes")
-2. Read `.claude/claudeclaw/settings.json`.
+2. Read `.claude/hermes/settings.json`.
 3. Set `heartbeat.interval` to the new value.
 4. Write the updated settings back.
 5. Confirm the change. The daemon will pick up the new interval within 30 seconds.
@@ -66,7 +62,7 @@ Change the heartbeat interval.
 
 Change the heartbeat prompt.
 
-1. Read `.claude/claudeclaw/settings.json` and show the current prompt.
+1. Read `.claude/hermes/settings.json` and show the current prompt.
 2. Use **AskUserQuestion**: "What prompt should the heartbeat run?" (header: "Prompt", options: suggest 2-3 prompts relevant to the project, plus the current prompt if set as an option)
 3. Set `heartbeat.prompt` to the new value.
 4. Write the updated settings back.
@@ -76,7 +72,7 @@ Change the heartbeat prompt.
 
 Toggle whether heartbeat outputs are forwarded to Telegram.
 
-1. Read `.claude/claudeclaw/settings.json`.
+1. Read `.claude/hermes/settings.json`.
 2. Set `heartbeat.forwardToTelegram` to `true` for `on` and `false` for `off`.
 3. Write the updated settings back.
 4. Confirm the change.
@@ -90,7 +86,7 @@ Set or update the Telegram bot token.
 
 1. If token is in `$ARGUMENTS`, use it directly.
 2. Otherwise, use **AskUserQuestion**: "What is your Telegram bot token from @BotFather?" (header: "Token", options: let user type via Other)
-3. Read `.claude/claudeclaw/settings.json`.
+3. Read `.claude/hermes/settings.json`.
 4. Set `telegram.token` to the new value.
 5. Write and confirm.
 
@@ -100,7 +96,7 @@ Set the allowed Telegram user IDs.
 
 1. If IDs are in `$ARGUMENTS`, parse them as comma-separated numbers.
 2. Otherwise, use **AskUserQuestion**: "What Telegram user IDs should be allowed? (comma-separated)" (header: "User IDs", options: let user type via Other)
-3. Read `.claude/claudeclaw/settings.json`.
+3. Read `.claude/hermes/settings.json`.
 4. Set `telegram.allowedUserIds` to the array of numbers.
 5. Write and confirm.
 
@@ -108,7 +104,7 @@ Set the allowed Telegram user IDs.
 
 Disable Telegram integration.
 
-1. Read `.claude/claudeclaw/settings.json`.
+1. Read `.claude/hermes/settings.json`.
 2. Set `telegram.token` to `""` and `telegram.allowedUserIds` to `[]`.
 3. Write and confirm.
 
@@ -117,8 +113,8 @@ Disable Telegram integration.
 Set the Claude model to use for sessions.
 
 1. If model name is in `$ARGUMENTS`, use it directly.
-2. Otherwise, use **AskUserQuestion**: "Which Claude model should ClaudeClaw use?" (header: "Model", options: "opus (default)", "sonnet", "haiku", "glm")
-3. Read `.claude/claudeclaw/settings.json`.
+2. Otherwise, use **AskUserQuestion**: "Which Claude model should Claude Hermes use?" (header: "Model", options: "opus (default)", "sonnet", "haiku", "glm")
+3. Read `.claude/hermes/settings.json`.
 4. Set `model` to the new value.
 5. If the selected model is `glm`, ask for `api` token (unless already set) and save it to top-level `api`.
 6. If model is changed away from `glm`, keep `api` unchanged.
@@ -129,8 +125,8 @@ Set the Claude model to use for sessions.
 Set or update the API token used when `model` is `glm`.
 
 1. If token is in `$ARGUMENTS`, use it directly.
-2. Otherwise, use **AskUserQuestion**: "What API token should ClaudeClaw use for glm?" (header: "API token", options: let user type via Other)
-3. Read `.claude/claudeclaw/settings.json`.
+2. Otherwise, use **AskUserQuestion**: "What API token should Claude Hermes use for glm?" (header: "API token", options: let user type via Other)
+3. Read `.claude/hermes/settings.json`.
 4. Set top-level `api` to the new value.
 5. Write and confirm.
 
@@ -139,8 +135,8 @@ Set or update the API token used when `model` is `glm`.
 Set the fallback model used when the primary model hits a rate limit.
 
 1. If fallback model name is in `$ARGUMENTS`, use it directly.
-2. Otherwise, use **AskUserQuestion**: "Which fallback model should ClaudeClaw use?" (header: "Fallback model", options: "glm (Recommended)", "sonnet", "haiku")
-3. Read `.claude/claudeclaw/settings.json`.
+2. Otherwise, use **AskUserQuestion**: "Which fallback model should Claude Hermes use?" (header: "Fallback model", options: "glm (Recommended)", "sonnet", "haiku")
+3. Read `.claude/hermes/settings.json`.
 4. Set `fallback.model` to the chosen value (`""` for none).
 5. Write and confirm.
 
@@ -149,8 +145,8 @@ Set the fallback model used when the primary model hits a rate limit.
 Set or clear the API token for the fallback model.
 
 1. If token is in `$ARGUMENTS`, use it directly.
-2. Otherwise, use **AskUserQuestion**: "What API token should ClaudeClaw use for fallback model?" (header: "Fallback API token", options: let user type via Other)
-3. Read `.claude/claudeclaw/settings.json`.
+2. Otherwise, use **AskUserQuestion**: "What API token should Claude Hermes use for fallback model?" (header: "Fallback API token", options: let user type via Other)
+3. Read `.claude/hermes/settings.json`.
 4. Set `fallback.api` to the new value.
 5. Write and confirm.
 
@@ -159,8 +155,8 @@ Set or clear the API token for the fallback model.
 Set the IANA timezone (e.g. `America/New_York`, `Europe/London`, `UTC`).
 
 1. If timezone is in `$ARGUMENTS`, use it directly.
-2. Otherwise, use **AskUserQuestion**: "What timezone should ClaudeClaw use?" (header: "Timezone", options: "UTC (Recommended)", "America/New_York", "Europe/London")
-3. Read `.claude/claudeclaw/settings.json`.
+2. Otherwise, use **AskUserQuestion**: "What timezone should Claude Hermes use?" (header: "Timezone", options: "UTC (Recommended)", "America/New_York", "Europe/London")
+3. Read `.claude/hermes/settings.json`.
 4. Set `timezone` to the new value. The `timezoneOffsetMinutes` will be auto-resolved from the timezone name.
 5. Write and confirm.
 
@@ -170,7 +166,7 @@ Set the security level for Claude sessions.
 
 1. If level is in `$ARGUMENTS`, validate it is one of: `locked`, `strict`, `moderate`, `unrestricted`.
 2. Otherwise, use **AskUserQuestion**: "What security level should sessions use?" (header: "Security", options: "locked — Read/Grep/Glob only", "strict — No Bash/WebSearch/WebFetch", "moderate — All tools, project-scoped (Recommended)", "unrestricted — All tools, no restrictions")
-3. Read `.claude/claudeclaw/settings.json`.
+3. Read `.claude/hermes/settings.json`.
 4. Set `security.level` to the new value.
 5. Write and confirm. Explain what the chosen level permits.
 
@@ -179,25 +175,8 @@ Set the security level for Claude sessions.
 Add tools to the allowed or disallowed lists.
 
 1. Parse comma-separated tool names from `$ARGUMENTS`.
-2. Read `.claude/claudeclaw/settings.json`.
+2. Read `.claude/hermes/settings.json`.
 3. Append to `security.allowedTools` or `security.disallowedTools` (deduplicated).
-4. Write and confirm.
-
-### `web on` / `web off` / `web enable` / `web disable`
-
-Toggle the web UI.
-
-1. Read `.claude/claudeclaw/settings.json`.
-2. Set `web.enabled` to `true` or `false`.
-3. Write and confirm.
-
-### `web port <port>` / `web host <host>`
-
-Configure web UI bind address or port.
-
-1. Parse the value from `$ARGUMENTS`.
-2. Read `.claude/claudeclaw/settings.json`.
-3. Set `web.port` (number) or `web.host` (string) accordingly.
 4. Write and confirm.
 
 ### `reset`
@@ -231,21 +210,16 @@ Reset all settings to defaults.
        "level": "moderate",
        "allowedTools": [],
        "disallowedTools": []
-     },
-     "web": {
-       "enabled": false,
-       "host": "127.0.0.1",
-       "port": 4632
      }
    }
    ```
-3. Confirm the reset. Note: this does not delete cron jobs — use `/heartbeat:jobs delete` for that.
+3. Confirm the reset. Note: this does not delete cron jobs — use `/claude-hermes:jobs delete` for that.
 
 ---
 
 ## Reference: Settings File
 
-Location: `.claude/claudeclaw/settings.json`
+Location: `.claude/hermes/settings.json`
 
 ```json
 {
@@ -274,11 +248,6 @@ Location: `.claude/claudeclaw/settings.json`
     "level": "moderate",
     "allowedTools": [],
     "disallowedTools": []
-  },
-  "web": {
-    "enabled": true,
-    "host": "127.0.0.1",
-    "port": 4632
   }
 }
 ```
@@ -304,8 +273,5 @@ Location: `.claude/claudeclaw/settings.json`
 | `security.level`           | string     | `locked` \| `strict` \| `moderate` \| `unrestricted` |
 | `security.allowedTools`    | string[]   | Extra tools to allow                           |
 | `security.disallowedTools` | string[]   | Tools to block                                 |
-| `web.enabled`              | boolean    | Whether the web UI is served                   |
-| `web.host`                 | string     | Bind address (default `127.0.0.1`)             |
-| `web.port`                 | number     | Port number (default `4632`)                   |
 
 The daemon hot-reloads this file every 30 seconds. No restart needed after changes.

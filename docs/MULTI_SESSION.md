@@ -1,6 +1,6 @@
 # Multi-Session Thread Support
 
-Technical documentation for ClaudeClaw's multi-session thread feature.
+Technical documentation for Claude Hermes's multi-session thread feature.
 
 ## Overview
 
@@ -56,7 +56,7 @@ Each queue prevents concurrent `--resume` calls on the same session (which would
 
 ## Storage
 
-### Global session: `.claude/claudeclaw/session.json`
+### Global session: `.claude/hermes/session.json`
 ```json
 {
   "sessionId": "uuid",
@@ -67,7 +67,7 @@ Each queue prevents concurrent `--resume` calls on the same session (which would
 }
 ```
 
-### Thread sessions: `.claude/claudeclaw/sessions.json`
+### Thread sessions: `.claude/hermes/sessions.json`
 ```json
 {
   "threads": {

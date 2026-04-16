@@ -1,0 +1,72 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "files": {
+    "include": [
+      "scripts/**/*.ts",
+      "tests/**/*.ts",
+      "src/runtime/**/*.ts",
+      "src/state/**/*.ts",
+      "src/router/**/*.ts",
+      "src/memory/**/*.ts",
+      "src/learning/**/*.ts",
+      "src/policy/**/*.ts",
+      "src/adapters/**/*.ts",
+      "src/migrate/**/*.ts",
+      "src/paths.ts",
+      "src/**/*.test.ts"
+    ],
+    "ignore": [
+      "node_modules",
+      "dist",
+      "build",
+      ".claude",
+      "images",
+      "docs"
+    ]
+  },
+  "organizeImports": {
+    "enabled": false
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 110
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "semicolons": "always",
+      "trailingCommas": "es5"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "suspicious": {
+        "noExplicitAny": "off",
+        "noConsole": "off",
+        "noAssignInExpressions": "off"
+      },
+      "style": {
+        "noNonNullAssertion": "off",
+        "useNodejsImportProtocol": "off",
+        "useTemplate": "off",
+        "noUnusedTemplateLiteral": "off",
+        "useNumberNamespace": "off"
+      },
+      "complexity": {
+        "noForEach": "off",
+        "useLiteralKeys": "off"
+      },
+      "correctness": {
+        "noUnusedVariables": "off",
+        "noUnusedImports": "off"
+      },
+      "performance": {
+        "noDelete": "off"
+      }
+    }
+  }
+}

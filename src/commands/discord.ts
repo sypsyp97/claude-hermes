@@ -9,6 +9,7 @@ import { transcribeAudioToText } from "../whisper";
 import { resolveSkillPrompt } from "../skills";
 import { mkdir } from "node:fs/promises";
 import { extname, join } from "node:path";
+import { discordInboxDir } from "../paths";
 
 // --- Discord API constants ---
 
@@ -305,17 +306,24 @@ Rules:
 - Return ONLY valid JSON or the word null. No explanation.`;
 
   try {
-    const { execSync } = await import("node:child_process");
+    const { execFileSync } = await import("node:child_process");
+    const { claudeArgv } = await import("../runtime/claude-cli");
     const input = `${systemPrompt}\n\n---\nUser message: ${text}`;
-    const result = execSync(
-      `claude --model claude-sonnet-4-20250514 --print --output-format text`,
-      {
-        input,
-        encoding: "utf-8",
-        timeout: 15000,
-        env: { ...process.env, HOME: homedir() },
-      },
-    ).trim();
+    const [bin, ...prefixArgs] = claudeArgv();
+    const cliArgs = [
+      ...prefixArgs,
+      "--model",
+      "claude-sonnet-4-20250514",
+      "--print",
+      "--output-format",
+      "text",
+    ];
+    const result = execFileSync(bin, cliArgs, {
+      input,
+      encoding: "utf-8",
+      timeout: 15000,
+      env: { ...process.env, HOME: homedir() },
+    }).trim();
 
     if (!result || result === "null") return null;
     // Extract JSON from response (in case there's extra text)
@@ -344,7 +352,7 @@ async function downloadDiscordAttachment(
   attachment: DiscordAttachment,
   type: "image" | "voice",
 ): Promise<string | null> {
-  const dir = join(process.cwd(), ".claude", "claudeclaw", "inbox", "discord");
+  const dir = discordInboxDir();
   await mkdir(dir, { recursive: true });
 
   const response = await fetch(attachment.url);
@@ -925,8 +933,8 @@ function sendIdentify(token: string): void {
       intents: INTENTS,
       properties: {
         os: process.platform,
-        browser: "claudeclaw",
-        device: "claudeclaw",
+        browser: "claude-hermes",
+        device: "claude-hermes",
       },
     },
   });
@@ -1200,7 +1208,7 @@ export async function discord() {
   const config = getSettings().discord;
 
   if (!config.token) {
-    console.error("Discord token not configured. Set discord.token in .claude/claudeclaw/settings.json");
+    console.error("Discord token not configured. Set discord.token in .claude/hermes/settings.json");
     process.exit(1);
   }
 

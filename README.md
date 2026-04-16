@@ -1,145 +1,86 @@
-<p align="center">
-  <img src="images/claudeclaw-banner.svg" alt="ClaudeClaw Banner" />
-</p>
-<p align="center">
-  <img src="images/claudeclaw-wordmark.png" alt="ClaudeClaw Wordmark" />
-</p>
+# Claude Hermes
 
-<p align="center">
-  <img src="https://awesome.re/badge.svg" alt="Awesome" />
-  <a href="https://github.com/moazbuilds/ClaudeClaw/stargazers">
-    <img src="https://img.shields.io/github/stars/moazbuilds/ClaudeClaw?style=flat-square&color=f59e0b" alt="GitHub Stars" />
-  </a>
-  <a href="https://github.com/moazbuilds/ClaudeClaw">
-    <img src="https://img.shields.io/badge/downloads-~10k-2da44e?style=flat-square" alt="Downloads ~10k" />
-  </a>
-  <a href="https://github.com/moazbuilds/ClaudeClaw/commits/master">
-    <img src="https://img.shields.io/github/last-commit/moazbuilds/ClaudeClaw?style=flat-square&color=0ea5e9" alt="Last Commit" />
-  </a>
-  <a href="https://github.com/moazbuilds/ClaudeClaw/graphs/contributors">
-    <img src="https://img.shields.io/github/contributors/moazbuilds/ClaudeClaw?style=flat-square&color=a855f7" alt="Contributors" />
-  </a>
-  <a href="https://x.com/moazbuilds">
-    <img src="https://img.shields.io/badge/X-%40moazbuilds-000000?style=flat-square&logo=x" alt="X @moazbuilds" />
-  </a>
-</p>
+> **Fork of [moazbuilds/claudeclaw](https://github.com/moazbuilds/claudeclaw).** Rebuilt around a SQLite state engine, an envelope-based router, an auto-promoting skills pipeline, and a yoyo-style self-evolution loop. The Telegram and Discord bridges are the only interfaces — no web dashboard.
 
-<p align="center"><b>A lightweight, open-source OpenClaw version built into your Claude Code.</b></p>
+Claude Hermes turns your Claude Code into a personal assistant that never sleeps. It runs as a background daemon, executes tasks on a schedule, responds on Telegram and Discord, transcribes voice commands, and learns new skills from your usage.
 
-ClaudeClaw turns your Claude Code into a personal assistant that never sleeps. It runs as a background daemon, executing tasks on a schedule, responding to messages on Telegram and Discord, transcribing voice commands, and integrating with any service you need.
+## Why Hermes (vs. the Claw fork it grew out of)
 
-> Note: Please don't use ClaudeClaw for hacking any bank system or doing any illegal activities. Thank you.
-
-## Why ClaudeClaw?
-
-| Category | ClaudeClaw | OpenClaw |
+| | Hermes | Claw |
 | --- | --- | --- |
-| Anthropic Will Come After You | No | Yes |
-| API Overhead | Directly uses your Claude Code subscription | Nightmare |
-| Setup & Installation | ~5 minutes | Nightmare |
-| Deployment | Install Claude Code on any device or VPS and run | Nightmare |
-| Isolation Model | Folder-based and isolated as needed | Global by default (security nightmare) |
-| Reliability | Simple reliable system for agents | Bugs nightmare |
-| Feature Scope | Lightweight features you actually use | 600k+ LOC nightmare |
-| Security | Average Claude Code usage | Nightmare |
-| Cost Efficiency | Efficient usage | Nightmare |
-| Memory | Uses Claude internal memory system + `CLAUDE.md` | Nightmare |
+| Storage | `bun:sqlite` + FTS5, single `state.db` | flat JSON files |
+| Sessions | scope-based router (`dm`, `per-channel-user`, `per-thread`, `shared`, `workspace`) | global + per-thread overrides |
+| Skills | candidate → shadow → active with rollback window | manual install only |
+| Self-evolution | 8h cron reads its own source, edits, runs `bun run verify`, commits on green | none |
+| Web dashboard | removed — talk to the daemon via Telegram/Discord/CLI | yes |
+| Verify pipeline | typecheck + lint + unit + smoke + integration, all five must be green | manual |
 
-## Getting Started in 5 Minutes
+## Install
 
 ```bash
-claude plugin marketplace add moazbuilds/claudeclaw
-claude plugin install claudeclaw
+git clone https://github.com/sypsyp97/claudeclaw.git claude-hermes
+cd claude-hermes
+bun install
+bun run verify
 ```
-Then open a Claude Code session and run:
+
+Open a Claude Code session in the cloned directory and run:
+
 ```
-/claudeclaw:start
+/claude-hermes:start
 ```
-The setup wizard walks you through model, heartbeat, Telegram, Discord, and security, then your daemon is live with a web dashboard.
 
-## What Would Be Built Next?
+The setup wizard walks you through model, heartbeat, Telegram, Discord, and security; the daemon then runs in the background.
 
-> **Mega Post:** Help shape the next ClaudeClaw features.
-> Vote, suggest ideas, and discuss priorities in **[this post](https://github.com/moazbuilds/claudeclaw/issues/14)**.
-
-<p align="center">
-  <a href="https://github.com/moazbuilds/claudeclaw/issues/14">
-    <img src="https://img.shields.io/badge/Roadmap-Mega%20Post-blue?style=for-the-badge&logo=github" alt="Roadmap Mega Post" />
-  </a>
-</p>
+If you previously ran the upstream Claw daemon in this workspace, the first `start` migrates `.claude/claudeclaw/` → `.claude/hermes/` once and then leaves the legacy directory untouched as a safety net.
 
 ## Features
 
 ### Automation
-- **Heartbeat:** Periodic check-ins with configurable intervals, quiet hours, and editable prompts.
-- **Cron Jobs:** Timezone-aware schedules for repeating or one-time tasks with reliable execution.
+- **Heartbeat:** periodic check-ins with configurable intervals, quiet hours, and editable prompts.
+- **Cron jobs:** timezone-aware schedules for repeating or one-time tasks.
+- **Self-evolution:** an 8h GitHub Actions cron reads its own source, asks Claude for one small improvement, runs the full verify pipeline, and commits on green / reverts on red.
 
 ### Communication
-- **Telegram:** Text, image, and voice support.
-- **Discord:** DMs, server mentions/replies, slash commands, voice messages, and image attachments.
-- **Time Awareness:** Message time prefixes help the agent understand delays and daily patterns.
+- **Telegram:** text, image, and voice (whisper.cpp or any OpenAI-compatible STT endpoint).
+- **Discord:** DMs, server mentions/replies, slash commands, voice messages, attachments.
+- **Time-aware messages:** prefixes help the agent reason about delays and daily patterns.
 
-### Multi-Session Threads (Discord)
-- **Independent Thread Sessions:** Each Discord thread gets its own Claude CLI session, fully isolated from the main channel.
-- **Parallel Processing:** Thread conversations run concurrently — messages in different threads don't block each other.
-- **Auto-Create:** First message in a new thread automatically bootstraps a fresh session. No setup needed.
-- **Session Cleanup:** Thread sessions are automatically cleaned up when threads are deleted or archived.
-- **Backward Compatible:** DMs and main channel messages continue using the global session.
+### Multi-session threads (Discord)
+- **Independent thread sessions:** each Discord thread gets its own Claude CLI session.
+- **Parallel processing:** messages in different threads don't block each other.
+- **Auto-create:** the first message in a new thread bootstraps a fresh session.
+- **Cleanup:** thread sessions are dropped when the thread is deleted or archived.
+- **Backwards-compatible:** DMs and main-channel messages keep using the global session.
 
-See [docs/MULTI_SESSION.md](docs/MULTI_SESSION.md) for technical details.
+See [docs/MULTI_SESSION.md](docs/MULTI_SESSION.md) for the routing details.
 
-### Reliability and Control
-- **GLM Fallback:** Automatically continue with GLM models if your primary limit is reached.
-- **Web Dashboard:** Manage jobs, monitor runs, and inspect logs in real time.
-- **Security Levels:** Four access levels from read-only to full system access.
-- **Model Selection:** Switch models based on your workload.
+### Reliability and control
+- **Model fallback:** automatically continue with a fallback model if the primary hits a limit.
+- **Security levels:** four tool-access tiers from `locked` to `unrestricted`.
+- **Skill auto-promotion:** repeated successful uses of a candidate skill promote it to active; a regression in the rollback window demotes it back to shadow.
 
-## FAQ
+## Verify pipeline
 
-<details open>
-  <summary><strong>Can ClaudeClaw do &lt;something&gt;?</strong></summary>
-  <p>
-    If Claude Code can do it, ClaudeClaw can do it too. ClaudeClaw adds cron jobs,
-    heartbeats, and Telegram/Discord bridges on top. You can also give your ClaudeClaw new
-    skills and teach it custom workflows.
-  </p>
-</details>
+`bun run verify` runs five stages and any failure is fatal:
 
-<details open>
-  <summary><strong>Is this project breaking Anthropic ToS?</strong></summary>
-  <p>
-    No. ClaudeClaw is local usage inside the Claude Code ecosystem. It wraps Claude Code
-    directly and does not require third-party OAuth outside that flow.
-    If you build your own scripts to do the same thing, it would be the same.
-  </p>
-</details>
+```
+typecheck → lint → unit → smoke → integration
+```
 
-<details open>
-  <summary><strong>Will Anthropic sue you for building ClaudeClaw?</strong></summary>
-  <p>
-    I hope not.
-  </p>
-</details>
+The self-evolution loop will only commit a change if all five are green; otherwise it `git restore`s and starts a fresh journal entry.
 
-<details open>
-  <summary><strong>Are you ready to change this project name?</strong></summary>
-  <p>
-    If it bothers Anthropic, I might rename it to OpenClawd. Not sure yet.
-  </p>
-</details>
+## Development
 
-## Screenshots
+```bash
+bun run typecheck   # tsc --noEmit
+bun run lint        # biome check src tests scripts
+bun run fmt         # biome format --write
+bun test src        # unit tests
+bun test tests/smoke
+bun test tests/integration
+```
 
-### Claude Code Folder-Based Status Bar
-![Claude Code folder-based status bar](images/bar.png)
+## Acknowledgements
 
-### Cool UI to Manage and Check Your ClaudeClaw
-![Cool UI to manage and check your ClaudeClaw](images/dashboard.png)
-
-## Contributors
-
-Thanks for helping make ClaudeClaw better.
-
-<a href="https://github.com/moazbuilds/claudeclaw/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=moazbuilds/claudeclaw" />
-</a>
+The Telegram bridge, Discord bridge, voice transcription, and the original cron/heartbeat scaffolding all come from [moazbuilds/claudeclaw](https://github.com/moazbuilds/claudeclaw). The skills loop borrows its evolutionary cadence from [yologdev/yoyo-evolve](https://github.com/yologdev/yoyo-evolve).

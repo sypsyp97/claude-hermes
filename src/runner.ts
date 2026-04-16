@@ -11,17 +11,21 @@ import {
 import { getSettings, type ModelConfig, type SecurityConfig } from "./config";
 import { buildClockPromptPrefix } from "./timezone";
 import { selectModel } from "./model-router";
+import { claudeArgv } from "./runtime/claude-cli";
+import {
+  LEGACY_MANAGED_BLOCK_END,
+  LEGACY_MANAGED_BLOCK_START,
+  MANAGED_BLOCK_END,
+  MANAGED_BLOCK_START,
+  logsDir,
+  promptsDir,
+} from "./paths";
 
-const LOGS_DIR = join(process.cwd(), ".claude/claudeclaw/logs");
-// Resolve prompts relative to the claudeclaw installation, not the project dir
+// Resolve prompts relative to the hermes installation, not the project dir
 const PROMPTS_DIR = join(import.meta.dir, "..", "prompts");
 const HEARTBEAT_PROMPT_FILE = join(PROMPTS_DIR, "heartbeat", "HEARTBEAT.md");
-// Project-level prompt overrides live here (gitignored, user-owned)
-const PROJECT_PROMPTS_DIR = join(process.cwd(), ".claude", "claudeclaw", "prompts");
 const PROJECT_CLAUDE_MD = join(process.cwd(), "CLAUDE.md");
 const LEGACY_PROJECT_CLAUDE_MD = join(process.cwd(), ".claude", "CLAUDE.md");
-const CLAUDECLAW_BLOCK_START = "<!-- claudeclaw:managed:start -->";
-const CLAUDECLAW_BLOCK_END = "<!-- claudeclaw:managed:end -->";
 
 /**
  * Compact configuration.
@@ -185,11 +189,11 @@ export async function ensureProjectClaudeMd(): Promise<void> {
   if (existsSync(PROJECT_CLAUDE_MD)) return;
 
   const promptContent = (await loadPrompts()).trim();
-  const managedBlock = [
-    CLAUDECLAW_BLOCK_START,
-    promptContent,
-    CLAUDECLAW_BLOCK_END,
-  ].join("\n");
+  // We always WRITE the new hermes-named markers. The dual-read regex below
+  // accepts the legacy block name so a stale one gets rewritten in place
+  // instead of being appended as a second block. The Phase 1D migrator does
+  // the same job at daemon startup for files not touched by preflight.
+  const managedBlock = [MANAGED_BLOCK_START, promptContent, MANAGED_BLOCK_END].join("\n");
 
   let content = "";
 
@@ -205,9 +209,10 @@ export async function ensureProjectClaudeMd(): Promise<void> {
 
   const normalized = content.trim();
   const hasManagedBlock =
-    normalized.includes(CLAUDECLAW_BLOCK_START) && normalized.includes(CLAUDECLAW_BLOCK_END);
+    (normalized.includes(MANAGED_BLOCK_START) && normalized.includes(MANAGED_BLOCK_END)) ||
+    (normalized.includes(LEGACY_MANAGED_BLOCK_START) && normalized.includes(LEGACY_MANAGED_BLOCK_END));
   const managedPattern = new RegExp(
-    `${CLAUDECLAW_BLOCK_START}[\\s\\S]*?${CLAUDECLAW_BLOCK_END}`,
+    `(${MANAGED_BLOCK_START}|${LEGACY_MANAGED_BLOCK_START})[\\s\\S]*?(${MANAGED_BLOCK_END}|${LEGACY_MANAGED_BLOCK_END})`,
     "m"
   );
 
@@ -276,10 +281,10 @@ async function loadPrompts(): Promise<string> {
 /**
  * Load the heartbeat prompt template.
  * Project-level override takes precedence: place a file at
- * .claude/claudeclaw/prompts/HEARTBEAT.md to fully replace the built-in template.
+ * .claude/hermes/prompts/HEARTBEAT.md to fully replace the built-in template.
  */
 export async function loadHeartbeatPromptTemplate(): Promise<string> {
-  const projectOverride = join(PROJECT_PROMPTS_DIR, "HEARTBEAT.md");
+  const projectOverride = join(promptsDir(), "HEARTBEAT.md");
   for (const file of [projectOverride, HEARTBEAT_PROMPT_FILE]) {
     try {
       const content = await Bun.file(file).text();
@@ -303,7 +308,8 @@ export async function runCompact(
   timeoutMs: number
 ): Promise<boolean> {
   const compactArgs = [
-    "claude", "-p", "/compact",
+    ...claudeArgv(),
+    "-p", "/compact",
     "--output-format", "text",
     "--resume", sessionId,
     ...securityArgs,
@@ -344,14 +350,15 @@ export async function compactCurrentSession(): Promise<{ success: boolean; messa
 }
 
 async function execClaude(name: string, prompt: string, threadId?: string): Promise<RunResult> {
-  await mkdir(LOGS_DIR, { recursive: true });
+  const logs = logsDir();
+  await mkdir(logs, { recursive: true });
 
   const existing = threadId
     ? await getThreadSession(threadId)
     : await getSession();
   const isNew = !existing;
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const logFile = join(LOGS_DIR, `${name}-${timestamp}.log`);
+  const logFile = join(logs, `${name}-${timestamp}.log`);
 
   const settings = getSettings();
   const { security, model, api, fallback, agentic } = settings;
@@ -387,7 +394,7 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
   // New session: use json output to capture Claude's session_id
   // Resumed session: use text output with --resume
   const outputFormat = isNew ? "json" : "text";
-  const args = ["claude", "-p", prompt, "--output-format", outputFormat, ...securityArgs];
+  const args = [...claudeArgv(), "-p", prompt, "--output-format", outputFormat, ...securityArgs];
 
   if (!isNew) {
     args.push("--resume", existing.sessionId);
@@ -398,7 +405,7 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
   // --append-system-prompt does not persist across --resume.
   const promptContent = await loadPrompts();
   const appendParts: string[] = [
-    "You are running inside ClaudeClaw.",
+    "You are running inside Claude Hermes.",
   ];
   if (promptContent) appendParts.push(promptContent);
 
@@ -543,137 +550,6 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
 
 export async function run(name: string, prompt: string, threadId?: string): Promise<RunResult> {
   return enqueue(() => execClaude(name, prompt, threadId), threadId);
-}
-
-async function streamClaude(
-  name: string,
-  prompt: string,
-  onChunk: (text: string) => void,
-  onUnblock: () => void
-): Promise<void> {
-  await mkdir(LOGS_DIR, { recursive: true });
-
-  const existing = await getSession();
-  const { security, model, api } = getSettings();
-  const securityArgs = buildSecurityArgs(security);
-
-  // stream-json gives us events as they happen — text before tool calls,
-  // so we can unblock the UI as soon as Claude acknowledges, not after sub-agents finish.
-  // --verbose is required for stream-json to produce output in -p (print) mode.
-  const args = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", ...securityArgs];
-
-  if (existing) args.push("--resume", existing.sessionId);
-
-  const promptContent = await loadPrompts();
-  const appendParts: string[] = ["You are running inside ClaudeClaw."];
-  if (promptContent) appendParts.push(promptContent);
-
-  if (existsSync(PROJECT_CLAUDE_MD)) {
-    try {
-      const claudeMd = await Bun.file(PROJECT_CLAUDE_MD).text();
-      if (claudeMd.trim()) appendParts.push(claudeMd.trim());
-    } catch {}
-  }
-
-  if (security.level !== "unrestricted") appendParts.push(DIR_SCOPE_PROMPT);
-  if (appendParts.length > 0) {
-    args.push("--append-system-prompt", appendParts.join("\n\n"));
-  }
-
-  const normalizedModel = model.trim().toLowerCase();
-  if (model.trim() && normalizedModel !== "glm") args.push("--model", model.trim());
-
-  const { CLAUDECODE: _, ...cleanEnv } = process.env;
-  const childEnv = buildChildEnv(cleanEnv as Record<string, string>, model, api);
-
-  console.log(`[${new Date().toLocaleTimeString()}] Running: ${name} (stream-json, session: ${existing?.sessionId?.slice(0, 8) ?? "new"})`);
-
-  const proc = Bun.spawn(args, {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: childEnv,
-  });
-
-  const reader = proc.stdout.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  let unblocked = false;
-  let textEmitted = false;
-
-  const maybeUnblock = () => {
-    if (!unblocked) {
-      unblocked = true;
-      onUnblock();
-    }
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-
-    // Parse complete newline-delimited JSON events
-    const lines = buf.split("\n");
-    buf = lines.pop() ?? "";
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const event = JSON.parse(trimmed) as Record<string, unknown>;
-
-        if (event.type === "system" && (event.subtype === "init" || event.session_id)) {
-          // Capture session ID for new sessions
-          const sid = event.session_id as string | undefined;
-          if (sid && !existing) {
-            await createSession(sid);
-            console.log(`[${new Date().toLocaleTimeString()}] Session created (stream-json): ${sid}`);
-          }
-        } else if (event.type === "assistant") {
-          // Text and tool_use blocks from the assistant
-          type ContentBlock = { type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> };
-          const msg = event.message as { content?: ContentBlock[] } | undefined;
-          const blocks = msg?.content ?? [];
-          let hasActivity = false;
-          for (const block of blocks) {
-            if (block.type === "text" && block.text) {
-              onChunk(block.text);
-              textEmitted = true;
-              hasActivity = true;
-            } else if (block.type === "tool_use") {
-              hasActivity = true;
-            }
-          }
-          if (hasActivity) maybeUnblock();
-        } else if (event.type === "tool_use") {
-          // Top-level tool_use event (some stream-json versions) — unblock the UI
-          maybeUnblock();
-        } else if (event.type === "result") {
-          // Final result event — emit text as fallback if no assistant text was seen
-          const resultText = (event as Record<string, unknown>).result as string | undefined;
-          if (resultText && !textEmitted) {
-            onChunk(resultText);
-          }
-          maybeUnblock();
-        }
-      } catch {}
-    }
-  }
-
-  await proc.exited;
-  // Ensure unblock fires even if something unexpected happened
-  maybeUnblock();
-
-  console.log(`[${new Date().toLocaleTimeString()}] Done: ${name}`);
-}
-
-export async function streamUserMessage(
-  name: string,
-  prompt: string,
-  onChunk: (text: string) => void,
-  onUnblock: () => void
-): Promise<void> {
-  return enqueue(() => streamClaude(name, prefixUserMessageWithClock(prompt), onChunk, onUnblock));
 }
 
 function prefixUserMessageWithClock(prompt: string): string {

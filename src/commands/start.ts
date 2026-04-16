@@ -1,21 +1,52 @@
-import { writeFile, unlink, mkdir } from "fs/promises";
+import { mkdir, unlink, writeFile } from "fs/promises";
 import { join } from "path";
 import { fileURLToPath } from "url";
-import { run, runUserMessage, streamUserMessage, bootstrap, ensureProjectClaudeMd, loadHeartbeatPromptTemplate } from "../runner";
-import { writeState, type StateData } from "../statusline";
 import { cronMatches, nextCronMatch } from "../cron";
-import { clearJobSchedule, loadJobs } from "../jobs";
-import { writePidFile, cleanupPidFile, checkExistingDaemon } from "../pid";
-import { initConfig, loadSettings, reloadSettings, resolvePrompt, type HeartbeatConfig, type Settings } from "../config";
+import {
+  type HeartbeatConfig,
+  initConfig,
+  loadSettings,
+  reloadSettings,
+  resolvePrompt,
+  type Settings,
+} from "../config";
+import { type Job, clearJobSchedule, loadJobs } from "../jobs";
+import { migrateIfNeeded } from "../migrate/legacy";
+import { checkExistingDaemon, cleanupPidFile, writePidFile } from "../pid";
+import {
+  bootstrap,
+  ensureProjectClaudeMd,
+  loadHeartbeatPromptTemplate,
+  run,
+  runUserMessage,
+} from "../runner";
+import { type StateData, writeState } from "../statusline";
 import { getDayAndMinuteAtOffset } from "../timezone";
-import { startWebUi, type WebServerHandle } from "../web";
-import type { Job } from "../jobs";
 
 const CLAUDE_DIR = join(process.cwd(), ".claude");
-const HEARTBEAT_DIR = join(CLAUDE_DIR, "claudeclaw");
+const HEARTBEAT_DIR = join(CLAUDE_DIR, "hermes");
 const STATUSLINE_FILE = join(CLAUDE_DIR, "statusline.cjs");
 const CLAUDE_SETTINGS_FILE = join(CLAUDE_DIR, "settings.json");
 const PREFLIGHT_SCRIPT = fileURLToPath(new URL("../preflight.ts", import.meta.url));
+
+async function runMigrationIfAny(): Promise<void> {
+  try {
+    const result = await migrateIfNeeded();
+    if (result.status === "migrated") {
+      console.log(
+        `[${new Date().toLocaleTimeString()}] Migrated legacy .claude/claudeclaw → .claude/hermes (${result.filesCopied ?? 0} file(s)). Archived source: ${result.archivedAs}`,
+      );
+    } else if (result.status === "conflict") {
+      console.warn(
+        `[${new Date().toLocaleTimeString()}] Legacy .claude/claudeclaw still exists alongside .claude/hermes; manual cleanup required.`,
+      );
+    }
+  } catch (err) {
+    console.error(
+      `[${new Date().toLocaleTimeString()}] Migration failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
 
 // --- Statusline setup/teardown ---
 
@@ -23,7 +54,7 @@ const STATUSLINE_SCRIPT = `#!/usr/bin/env node
 const { readFileSync } = require("fs");
 const { join } = require("path");
 
-const DIR = join(__dirname, "claudeclaw");
+const DIR = join(__dirname, "hermes");
 const STATE_FILE = join(DIR, "state.json");
 const PID_FILE = join(DIR, "daemon.pid");
 
@@ -56,7 +87,7 @@ var TR = DIM + "\\u256e" + R;
 var BL = DIM + "\\u2570" + R;
 var BR = DIM + "\\u256f" + R;
 var H = DIM + "\\u2500" + R;
-var HEADER = TL + H.repeat(6) + " \\ud83e\\udd9e ClaudeClaw \\ud83e\\udd9e " + H.repeat(6) + TR;
+var HEADER = TL + H.repeat(6) + " \\ud83e\\udd9e Claude Hermes \\ud83e\\udd9e " + H.repeat(6) + TR;
 var FOOTER = BL + H.repeat(30) + BR;
 
 if (!alive()) {
@@ -113,7 +144,11 @@ function isHeartbeatExcludedNow(config: HeartbeatConfig, timezoneOffsetMinutes: 
   return isHeartbeatExcludedAt(config, timezoneOffsetMinutes, new Date());
 }
 
-function isHeartbeatExcludedAt(config: HeartbeatConfig, timezoneOffsetMinutes: number, at: Date): boolean {
+function isHeartbeatExcludedAt(
+  config: HeartbeatConfig,
+  timezoneOffsetMinutes: number,
+  at: Date,
+): boolean {
   if (!Array.isArray(config.excludeWindows) || config.excludeWindows.length === 0) return false;
   const local = getDayAndMinuteAtOffset(at, timezoneOffsetMinutes);
 
@@ -146,7 +181,7 @@ function nextAllowedHeartbeatAt(
   config: HeartbeatConfig,
   timezoneOffsetMinutes: number,
   intervalMs: number,
-  fromMs: number
+  fromMs: number,
 ): number {
   const interval = Math.max(60_000, Math.round(intervalMs));
   let candidate = fromMs + interval;
@@ -201,9 +236,7 @@ export async function start(args: string[] = []) {
   let telegramFlag = false;
   let discordFlag = false;
   let debugFlag = false;
-  let webFlag = false;
   let replaceExistingFlag = false;
-  let webPortFlag: number | null = null;
   const payloadParts: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -218,30 +251,17 @@ export async function start(args: string[] = []) {
       discordFlag = true;
     } else if (arg === "--debug") {
       debugFlag = true;
-    } else if (arg === "--web") {
-      webFlag = true;
     } else if (arg === "--replace-existing") {
       replaceExistingFlag = true;
-    } else if (arg === "--web-port") {
-      const raw = args[i + 1];
-      if (!raw) {
-        console.error("`--web-port` requires a numeric value.");
-        process.exit(1);
-      }
-      const parsed = Number(raw);
-      if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65535) {
-        console.error("`--web-port` must be a valid TCP port (1-65535).");
-        process.exit(1);
-      }
-      webPortFlag = parsed;
-      i++;
     } else {
       payloadParts.push(arg);
     }
   }
   const payload = payloadParts.join(" ").trim();
   if (hasPromptFlag && !payload) {
-    console.error("Usage: claudeclaw start --prompt <prompt> [--trigger] [--telegram] [--discord] [--debug] [--web] [--web-port <port>] [--replace-existing]");
+    console.error(
+      "Usage: claude-hermes start --prompt <prompt> [--trigger] [--telegram] [--discord] [--debug] [--replace-existing]",
+    );
     process.exit(1);
   }
   if (!hasPromptFlag && payload) {
@@ -256,17 +276,18 @@ export async function start(args: string[] = []) {
     console.error("`--discord` with `start` requires `--trigger`.");
     process.exit(1);
   }
-  if (hasPromptFlag && !hasTriggerFlag && (webFlag || webPortFlag !== null)) {
-    console.error("`--web` is daemon-only. Remove `--prompt`, or add `--trigger`.");
-    process.exit(1);
-  }
 
   // One-shot mode: explicit prompt without trigger.
   if (hasPromptFlag && !hasTriggerFlag) {
+    await runMigrationIfAny();
     const existingPid = await checkExistingDaemon();
     if (existingPid) {
-      console.error(`\x1b[31mAborted: daemon already running in this directory (PID ${existingPid})\x1b[0m`);
-      console.error("Use `claudeclaw send <message> [--telegram] [--discord]` while daemon is running.");
+      console.error(
+        `\x1b[31mAborted: daemon already running in this directory (PID ${existingPid})\x1b[0m`,
+      );
+      console.error(
+        "Use `claude-hermes send <message> [--telegram] [--discord]` while daemon is running.",
+      );
       process.exit(1);
     }
 
@@ -279,10 +300,13 @@ export async function start(args: string[] = []) {
     return;
   }
 
+  await runMigrationIfAny();
   const existingPid = await checkExistingDaemon();
   if (existingPid) {
     if (!replaceExistingFlag) {
-      console.error(`\x1b[31mAborted: daemon already running in this directory (PID ${existingPid})\x1b[0m`);
+      console.error(
+        `\x1b[31mAborted: daemon already running in this directory (PID ${existingPid})\x1b[0m`,
+      );
       console.error(`Use --stop first, or kill PID ${existingPid} manually.`);
       process.exit(1);
     }
@@ -311,17 +335,13 @@ export async function start(args: string[] = []) {
   const settings = await loadSettings();
   await ensureProjectClaudeMd();
   const jobs = await loadJobs();
-  const webEnabled = webFlag || webPortFlag !== null || settings.web.enabled;
-  const webPort = webPortFlag ?? settings.web.port;
 
   await setupStatusline();
   await writePidFile();
-  let web: WebServerHandle | null = null;
   let discordStopGateway: (() => void) | null = null;
 
   async function shutdown() {
     if (discordStopGateway) discordStopGateway();
-    if (web) web.stop();
     await teardownStatusline();
     await cleanupPidFile();
     process.exit(0);
@@ -329,15 +349,18 @@ export async function start(args: string[] = []) {
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 
-  console.log("ClaudeClaw daemon started");
+  console.log("Claude Hermes daemon started");
   console.log(`  PID: ${process.pid}`);
   console.log(`  Security: ${settings.security.level}`);
-  if (settings.security.allowedTools.length > 0)
+  if (settings.security.allowedTools.length > 0) {
     console.log(`    + allowed: ${settings.security.allowedTools.join(", ")}`);
-  if (settings.security.disallowedTools.length > 0)
+  }
+  if (settings.security.disallowedTools.length > 0) {
     console.log(`    - blocked: ${settings.security.disallowedTools.join(", ")}`);
-  console.log(`  Heartbeat: ${settings.heartbeat.enabled ? `every ${settings.heartbeat.interval}m` : "disabled"}`);
-  console.log(`  Web UI: ${webEnabled ? `http://${settings.web.host}:${webPort}` : "disabled"}`);
+  }
+  console.log(
+    `  Heartbeat: ${settings.heartbeat.enabled ? `every ${settings.heartbeat.interval}m` : "disabled"}`,
+  );
   if (debugFlag) console.log("  Debug: enabled");
   console.log(`  Jobs loaded: ${jobs.length}`);
   jobs.forEach((j) => console.log(`    - ${j.name} [${j.schedule}]`));
@@ -395,94 +418,10 @@ export async function start(args: string[] = []) {
   await initDiscord(currentSettings.discord.token);
   if (!discordToken) console.log("  Discord: not configured");
 
-  function isAddrInUse(err: unknown): boolean {
-    if (!err || typeof err !== "object") return false;
-    const code = "code" in err ? String((err as { code?: unknown }).code) : "";
-    const message = "message" in err ? String((err as { message?: unknown }).message) : "";
-    return code === "EADDRINUSE" || message.includes("EADDRINUSE");
-  }
-
-  function startWebWithFallback(host: string, preferredPort: number): WebServerHandle {
-    const maxAttempts = 10;
-    let lastError: unknown;
-    for (let i = 0; i < maxAttempts; i++) {
-      const candidatePort = preferredPort + i;
-      try {
-        return startWebUi({
-          host,
-          port: candidatePort,
-          getSnapshot: () => ({
-            pid: process.pid,
-            startedAt: daemonStartedAt,
-            heartbeatNextAt: nextHeartbeatAt,
-            settings: currentSettings,
-            jobs: currentJobs,
-          }),
-          onHeartbeatEnabledChanged: (enabled) => {
-            if (currentSettings.heartbeat.enabled === enabled) return;
-            currentSettings.heartbeat.enabled = enabled;
-            scheduleHeartbeat();
-            updateState();
-            console.log(`[${ts()}] Heartbeat ${enabled ? "enabled" : "disabled"} from Web UI`);
-          },
-          onHeartbeatSettingsChanged: (patch) => {
-            let changed = false;
-            if (typeof patch.enabled === "boolean" && currentSettings.heartbeat.enabled !== patch.enabled) {
-              currentSettings.heartbeat.enabled = patch.enabled;
-              changed = true;
-            }
-            if (typeof patch.interval === "number" && Number.isFinite(patch.interval)) {
-              const interval = Math.max(1, Math.min(1440, Math.round(patch.interval)));
-              if (currentSettings.heartbeat.interval !== interval) {
-                currentSettings.heartbeat.interval = interval;
-                changed = true;
-              }
-            }
-          if (typeof patch.prompt === "string" && currentSettings.heartbeat.prompt !== patch.prompt) {
-            currentSettings.heartbeat.prompt = patch.prompt;
-            changed = true;
-          }
-          if (Array.isArray(patch.excludeWindows)) {
-            const prev = JSON.stringify(currentSettings.heartbeat.excludeWindows);
-            const next = JSON.stringify(patch.excludeWindows);
-            if (prev !== next) {
-              currentSettings.heartbeat.excludeWindows = patch.excludeWindows;
-              changed = true;
-            }
-          }
-          if (!changed) return;
-          scheduleHeartbeat();
-          updateState();
-            console.log(`[${ts()}] Heartbeat settings updated from Web UI`);
-          },
-          onJobsChanged: async () => {
-            currentJobs = await loadJobs();
-            scheduleHeartbeat();
-            updateState();
-            console.log(`[${ts()}] Jobs reloaded from Web UI`);
-          },
-          onChat: async (message, onChunk, onUnblock) => {
-            await streamUserMessage("chat", message, onChunk, onUnblock);
-          },
-        });
-      } catch (err) {
-        lastError = err;
-        if (!isAddrInUse(err) || i === maxAttempts - 1) throw err;
-      }
-    }
-
-    throw lastError;
-  }
-
-  if (webEnabled) {
-    currentSettings.web.enabled = true;
-    web = startWebWithFallback(currentSettings.web.host, webPort);
-    currentSettings.web.port = web.port;
-    console.log(`[${new Date().toLocaleTimeString()}] Web UI listening on http://${web.host}:${web.port}`);
-  }
-
   // --- Helpers ---
-  function ts() { return new Date().toLocaleTimeString(); }
+  function ts() {
+    return new Date().toLocaleTimeString();
+  }
 
   function startPreflightInBackground(projectPath: string): void {
     try {
@@ -498,26 +437,34 @@ export async function start(args: string[] = []) {
     }
   }
 
-  function forwardToTelegram(label: string, result: { exitCode: number; stdout: string; stderr: string }) {
+  function forwardToTelegram(
+    label: string,
+    result: { exitCode: number; stdout: string; stderr: string },
+  ) {
     if (!telegramSend || currentSettings.telegram.allowedUserIds.length === 0) return;
-    const text = result.exitCode === 0
-      ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
-      : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
+    const text =
+      result.exitCode === 0
+        ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
+        : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
     for (const userId of currentSettings.telegram.allowedUserIds) {
       telegramSend(userId, text).catch((err) =>
-        console.error(`[Telegram] Failed to forward to ${userId}: ${err}`)
+        console.error(`[Telegram] Failed to forward to ${userId}: ${err}`),
       );
     }
   }
 
-  function forwardToDiscord(label: string, result: { exitCode: number; stdout: string; stderr: string }) {
+  function forwardToDiscord(
+    label: string,
+    result: { exitCode: number; stdout: string; stderr: string },
+  ) {
     if (!discordSendToUser || currentSettings.discord.allowedUserIds.length === 0) return;
-    const text = result.exitCode === 0
-      ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
-      : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
+    const text =
+      result.exitCode === 0
+        ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
+        : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
     for (const userId of currentSettings.discord.allowedUserIds) {
       discordSendToUser(userId, text).catch((err) =>
-        console.error(`[Discord] Failed to forward to ${userId}: ${err}`)
+        console.error(`[Discord] Failed to forward to ${userId}: ${err}`),
       );
     }
   }
@@ -537,7 +484,7 @@ export async function start(args: string[] = []) {
       currentSettings.heartbeat,
       currentSettings.timezoneOffsetMinutes,
       ms,
-      Date.now()
+      Date.now(),
     );
 
     function tick() {
@@ -547,7 +494,7 @@ export async function start(args: string[] = []) {
           currentSettings.heartbeat,
           currentSettings.timezoneOffsetMinutes,
           ms,
-          Date.now()
+          Date.now(),
         );
         return;
       }
@@ -567,7 +514,8 @@ export async function start(args: string[] = []) {
         })
         .then((r) => {
           if (!r) return;
-          const shouldForward = currentSettings.heartbeat.forwardToTelegram || !r.stdout.trim().startsWith("HEARTBEAT_OK");
+          const shouldForward =
+            currentSettings.heartbeat.forwardToTelegram || !r.stdout.trim().startsWith("HEARTBEAT_OK");
           if (shouldForward) {
             forwardToTelegram("", r);
             forwardToDiscord("", r);
@@ -577,7 +525,7 @@ export async function start(args: string[] = []) {
         currentSettings.heartbeat,
         currentSettings.timezoneOffsetMinutes,
         ms,
-        Date.now()
+        Date.now(),
       );
     }
 
@@ -597,7 +545,9 @@ export async function start(args: string[] = []) {
     if (telegramFlag) forwardToTelegram("", triggerResult);
     if (discordFlag) forwardToDiscord("", triggerResult);
     if (triggerResult.exitCode !== 0) {
-      console.error(`[${ts()}] Startup trigger failed (exit ${triggerResult.exitCode}). Daemon will continue running.`);
+      console.error(
+        `[${ts()}] Startup trigger failed (exit ${triggerResult.exitCode}). Daemon will continue running.`,
+      );
     }
   } else {
     // Bootstrap the session first so system prompt is initial context
@@ -616,50 +566,51 @@ export async function start(args: string[] = []) {
       const newSettings = await reloadSettings();
       const newJobs = await loadJobs();
 
-      // Detect heartbeat config changes
       const hbChanged =
         newSettings.heartbeat.enabled !== currentSettings.heartbeat.enabled ||
         newSettings.heartbeat.interval !== currentSettings.heartbeat.interval ||
         newSettings.heartbeat.prompt !== currentSettings.heartbeat.prompt ||
         newSettings.timezoneOffsetMinutes !== currentSettings.timezoneOffsetMinutes ||
         newSettings.timezone !== currentSettings.timezone ||
-        JSON.stringify(newSettings.heartbeat.excludeWindows) !== JSON.stringify(currentSettings.heartbeat.excludeWindows);
+        JSON.stringify(newSettings.heartbeat.excludeWindows) !==
+          JSON.stringify(currentSettings.heartbeat.excludeWindows);
 
-      // Detect security config changes
       const secChanged =
         newSettings.security.level !== currentSettings.security.level ||
-        newSettings.security.allowedTools.join(",") !== currentSettings.security.allowedTools.join(",") ||
-        newSettings.security.disallowedTools.join(",") !== currentSettings.security.disallowedTools.join(",");
+        newSettings.security.allowedTools.join(",") !==
+          currentSettings.security.allowedTools.join(",") ||
+        newSettings.security.disallowedTools.join(",") !==
+          currentSettings.security.disallowedTools.join(",");
 
       if (secChanged) {
         console.log(`[${ts()}] Security level changed → ${newSettings.security.level}`);
       }
 
       if (hbChanged) {
-        console.log(`[${ts()}] Config change detected — heartbeat: ${newSettings.heartbeat.enabled ? `every ${newSettings.heartbeat.interval}m` : "disabled"}`);
+        console.log(
+          `[${ts()}] Config change detected — heartbeat: ${newSettings.heartbeat.enabled ? `every ${newSettings.heartbeat.interval}m` : "disabled"}`,
+        );
         currentSettings = newSettings;
         scheduleHeartbeat();
       } else {
         currentSettings = newSettings;
       }
-      if (web) {
-        currentSettings.web.enabled = true;
-        currentSettings.web.port = web.port;
-      }
 
-      // Detect job changes
-      const jobNames = newJobs.map((j) => `${j.name}:${j.schedule}:${j.prompt}`).sort().join("|");
-      const oldJobNames = currentJobs.map((j) => `${j.name}:${j.schedule}:${j.prompt}`).sort().join("|");
+      const jobNames = newJobs
+        .map((j) => `${j.name}:${j.schedule}:${j.prompt}`)
+        .sort()
+        .join("|");
+      const oldJobNames = currentJobs
+        .map((j) => `${j.name}:${j.schedule}:${j.prompt}`)
+        .sort()
+        .join("|");
       if (jobNames !== oldJobNames) {
         console.log(`[${ts()}] Jobs reloaded: ${newJobs.length} job(s)`);
         newJobs.forEach((j) => console.log(`    - ${j.name} [${j.schedule}]`));
       }
       currentJobs = newJobs;
 
-      // Telegram changes
       await initTelegram(newSettings.telegram.token);
-
-      // Discord changes
       await initDiscord(newSettings.discord.token);
     } catch (err) {
       console.error(`[${ts()}] Hot-reload error:`, err);
@@ -670,9 +621,7 @@ export async function start(args: string[] = []) {
   function updateState() {
     const now = new Date();
     const state: StateData = {
-      heartbeat: currentSettings.heartbeat.enabled
-        ? { nextAt: nextHeartbeatAt }
-        : undefined,
+      heartbeat: currentSettings.heartbeat.enabled ? { nextAt: nextHeartbeatAt } : undefined,
       jobs: currentJobs.map((job) => ({
         name: job.name,
         nextAt: nextCronMatch(job.schedule, now, currentSettings.timezoneOffsetMinutes).getTime(),
@@ -681,11 +630,6 @@ export async function start(args: string[] = []) {
       telegram: !!currentSettings.telegram.token,
       discord: !!currentSettings.discord.token,
       startedAt: daemonStartedAt,
-      web: {
-        enabled: !!web,
-        host: currentSettings.web.host,
-        port: currentSettings.web.port,
-      },
     };
     writeState(state);
   }

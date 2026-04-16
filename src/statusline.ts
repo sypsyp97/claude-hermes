@@ -1,6 +1,5 @@
 import { join } from "path";
-
-const HEARTBEAT_DIR = join(process.cwd(), ".claude", "claudeclaw");
+import { hermesDir } from "./paths";
 
 // Write state.json so the statusline script can read fresh data
 export interface StateData {
@@ -10,12 +9,11 @@ export interface StateData {
   telegram: boolean;
   discord: boolean;
   startedAt: number;
-  web?: { enabled: boolean; host: string; port: number };
 }
 
 export async function writeState(state: StateData) {
   await Bun.write(
-    join(HEARTBEAT_DIR, "state.json"),
+    join(hermesDir(), "state.json"),
     JSON.stringify(state) + "\n"
   );
 }

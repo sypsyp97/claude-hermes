@@ -1,10 +1,8 @@
 import { writeFile, unlink, readFile } from "fs/promises";
-import { join } from "path";
-
-const PID_FILE = join(process.cwd(), ".claude", "claudeclaw", "daemon.pid");
+import { pidFile } from "./paths";
 
 export function getPidPath(): string {
-  return PID_FILE;
+  return pidFile();
 }
 
 /**
@@ -15,7 +13,7 @@ export function getPidPath(): string {
 export async function checkExistingDaemon(): Promise<number | null> {
   let raw: string;
   try {
-    raw = (await readFile(PID_FILE, "utf-8")).trim();
+    raw = (await readFile(pidFile(), "utf-8")).trim();
   } catch {
     return null; // no pid file
   }
@@ -37,12 +35,12 @@ export async function checkExistingDaemon(): Promise<number | null> {
 }
 
 export async function writePidFile(): Promise<void> {
-  await writeFile(PID_FILE, String(process.pid) + "\n");
+  await writeFile(pidFile(), String(process.pid) + "\n");
 }
 
 export async function cleanupPidFile(): Promise<void> {
   try {
-    await unlink(PID_FILE);
+    await unlink(pidFile());
   } catch {
     // already gone
   }

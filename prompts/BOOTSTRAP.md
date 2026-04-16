@@ -28,7 +28,7 @@ Then work through these naturally, **one at a time**, waiting for responses:
 - What should you call them?
 - Their timezone (so you know when to be quiet)
 
-After you know their timezone and preferred quiet hours, update `.claude/claudeclaw/settings.json` heartbeat schedule:
+After you know their timezone and preferred quiet hours, update `.claude/hermes/settings.json` heartbeat schedule:
 - Set top-level `timezone` to a simple UTC offset label (example: `UTC-5`, `UTC+1`, `UTC+03:30`)
 - Set `heartbeat.excludeWindows` to quiet windows (example: `[{ "days": [1,2,3,4,5], "start": "23:00", "end": "07:00" }]`)
 
@@ -78,9 +78,9 @@ Write it cleanly. Future-you will read this cold every session.
 
 Ask how they want to reach you:
 
-- **Just here** — terminal/web chat only
-- **WhatsApp** — link their personal account (you'll show a QR code)
+- **Just here** — Claude Code session only
 - **Telegram** — set up a bot via BotFather
+- **Discord** — DM your bot or @-mention it in a server
 
 Guide them through whichever they pick.
 

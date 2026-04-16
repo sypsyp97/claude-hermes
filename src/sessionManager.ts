@@ -1,7 +1,4 @@
-import { join } from "path";
-
-const HEARTBEAT_DIR = join(process.cwd(), ".claude", "claudeclaw");
-const SESSIONS_FILE = join(HEARTBEAT_DIR, "sessions.json");
+import { threadSessionsFile } from "./paths";
 
 export interface ThreadSession {
   sessionId: string;
@@ -21,7 +18,7 @@ let sessionsCache: SessionsData | null = null;
 async function loadSessions(): Promise<SessionsData> {
   if (sessionsCache) return sessionsCache;
   try {
-    sessionsCache = await Bun.file(SESSIONS_FILE).json();
+    sessionsCache = await Bun.file(threadSessionsFile()).json();
     return sessionsCache!;
   } catch {
     sessionsCache = { threads: {} };
@@ -31,7 +28,7 @@ async function loadSessions(): Promise<SessionsData> {
 
 async function saveSessions(data: SessionsData): Promise<void> {
   sessionsCache = data;
-  await Bun.write(SESSIONS_FILE, JSON.stringify(data, null, 2) + "\n");
+  await Bun.write(threadSessionsFile(), JSON.stringify(data, null, 2) + "\n");
 }
 
 /** Get session for a thread. Returns null if no session exists yet. */

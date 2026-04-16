@@ -1,8 +1,6 @@
 import { join } from "path";
 import { unlink, readdir, rename } from "fs/promises";
-
-const HEARTBEAT_DIR = join(process.cwd(), ".claude", "claudeclaw");
-const SESSION_FILE = join(HEARTBEAT_DIR, "session.json");
+import { hermesDir, sessionFile } from "./paths";
 
 export interface GlobalSession {
   sessionId: string;
@@ -17,7 +15,7 @@ let current: GlobalSession | null = null;
 async function loadSession(): Promise<GlobalSession | null> {
   if (current) return current;
   try {
-    current = await Bun.file(SESSION_FILE).json();
+    current = await Bun.file(sessionFile()).json();
     return current;
   } catch {
     return null;
@@ -26,7 +24,7 @@ async function loadSession(): Promise<GlobalSession | null> {
 
 async function saveSession(session: GlobalSession): Promise<void> {
   current = session;
-  await Bun.write(SESSION_FILE, JSON.stringify(session, null, 2) + "\n");
+  await Bun.write(sessionFile(), JSON.stringify(session, null, 2) + "\n");
 }
 
 /** Returns the existing session or null. Never creates one. */
@@ -80,7 +78,7 @@ export async function markCompactWarned(): Promise<void> {
 export async function resetSession(): Promise<void> {
   current = null;
   try {
-    await unlink(SESSION_FILE);
+    await unlink(sessionFile());
   } catch {
     // already gone
   }
@@ -93,7 +91,7 @@ export async function backupSession(): Promise<string | null> {
   // Find next backup index
   let files: string[];
   try {
-    files = await readdir(HEARTBEAT_DIR);
+    files = await readdir(hermesDir());
   } catch {
     files = [];
   }
@@ -103,8 +101,8 @@ export async function backupSession(): Promise<string | null> {
   const nextIndex = indices.length > 0 ? Math.max(...indices) + 1 : 1;
 
   const backupName = `session_${nextIndex}.backup`;
-  const backupPath = join(HEARTBEAT_DIR, backupName);
-  await rename(SESSION_FILE, backupPath);
+  const backupPath = join(hermesDir(), backupName);
+  await rename(sessionFile(), backupPath);
   current = null;
 
   return backupName;

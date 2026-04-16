@@ -2,9 +2,10 @@ import { writeFile, unlink, readdir, readFile } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
 import { getPidPath, cleanupPidFile } from "../pid";
+import { hermesDir, pidFile } from "../paths";
 
 const CLAUDE_DIR = join(process.cwd(), ".claude");
-const HEARTBEAT_DIR = join(CLAUDE_DIR, "claudeclaw");
+const HEARTBEAT_DIR = hermesDir();
 const STATUSLINE_FILE = join(CLAUDE_DIR, "statusline.cjs");
 const CLAUDE_SETTINGS_FILE = join(CLAUDE_DIR, "settings.json");
 
@@ -66,11 +67,11 @@ export async function stopAll() {
   let found = 0;
   for (const dir of dirs) {
     const projectPath = "/" + dir.slice(1).replace(/-/g, "/");
-    const pidFile = join(projectPath, ".claude", "claudeclaw", "daemon.pid");
+    const pidFilePath = pidFile(projectPath);
 
     let pid: string;
     try {
-      pid = (await readFile(pidFile, "utf-8")).trim();
+      pid = (await readFile(pidFilePath, "utf-8")).trim();
       process.kill(Number(pid), 0);
     } catch {
       continue;
@@ -80,7 +81,7 @@ export async function stopAll() {
     try {
       process.kill(Number(pid), "SIGTERM");
       console.log(`\x1b[33m■ Stopped\x1b[0m PID ${pid} — ${projectPath}`);
-      try { await unlink(pidFile); } catch {}
+      try { await unlink(pidFilePath); } catch {}
     } catch {
       console.log(`\x1b[31m✗ Failed to stop\x1b[0m PID ${pid} — ${projectPath}`);
     }

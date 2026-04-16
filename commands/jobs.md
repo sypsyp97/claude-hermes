@@ -4,7 +4,7 @@ description: "Create, list, edit, or delete cron jobs. Triggers: create a job, a
 
 Manage cron jobs for the heartbeat daemon. Use `$ARGUMENTS` to determine the action.
 
-**CRITICAL: Job files MUST be created in the project-relative path `.claude/claudeclaw/jobs/`, NOT in `~/.claude/claudeclaw/jobs/`.** The daemon only watches the project directory. Using the home directory path will silently fail — the job will never fire.
+**CRITICAL: Job files MUST be created in the project-relative path `.claude/hermes/jobs/`, NOT in `~/.claude/hermes/jobs/`.** The daemon only watches the project directory. Using the home directory path will silently fail — the job will never fire.
 
 Parse `$ARGUMENTS` to identify the sub-command. If no arguments are given, list all jobs.
 
@@ -12,7 +12,7 @@ Parse `$ARGUMENTS` to identify the sub-command. If no arguments are given, list 
 
 ### `list` (default when no arguments)
 
-1. List all `.md` files in `.claude/claudeclaw/jobs/`.
+1. List all `.md` files in `.claude/hermes/jobs/`.
 2. For each file, read it and display:
    - **Job name** (filename without `.md`)
    - **Schedule** (cron expression from frontmatter)
@@ -30,7 +30,7 @@ Create a new cron job interactively.
 2. Then ask:
    - "What prompt should Claude execute?" (header: "Prompt", options: suggest 2-3 prompts relevant to the project context)
 
-3. Create the job file at `.claude/claudeclaw/jobs/<name>.md` with this exact format:
+3. Create the job file at `.claude/hermes/jobs/<name>.md` with this exact format:
    ```markdown
    ---
    schedule: "<cron expression>"
@@ -44,7 +44,7 @@ Create a new cron job interactively.
 
 Edit an existing cron job.
 
-1. Read `.claude/claudeclaw/jobs/<job-name>.md`. If it doesn't exist, list available jobs and ask the user which one to edit.
+1. Read `.claude/hermes/jobs/<job-name>.md`. If it doesn't exist, list available jobs and ask the user which one to edit.
 2. Show the current schedule and prompt.
 3. Use **AskUserQuestion** to ask:
    - "What do you want to change?" (header: "Edit", options: "Schedule", "Prompt", "Both")
@@ -60,14 +60,14 @@ Delete a cron job.
 
 1. If no job name given in `$ARGUMENTS`, list all jobs and use **AskUserQuestion** to ask which one to delete.
 2. Confirm deletion with **AskUserQuestion**: "Delete job '<name>'? This cannot be undone." (header: "Confirm", options: "Yes, delete it", "No, keep it")
-3. If confirmed, delete `.claude/claudeclaw/jobs/<job-name>.md`.
+3. If confirmed, delete `.claude/hermes/jobs/<job-name>.md`.
 4. Confirm deletion. The daemon will pick up the change on the next hot-reload cycle (within 30s).
 
 ### `run <job-name>`
 
 Manually trigger a cron job immediately (useful for testing).
 
-1. Read `.claude/claudeclaw/jobs/<job-name>.md`. If it doesn't exist, list available jobs.
+1. Read `.claude/hermes/jobs/<job-name>.md`. If it doesn't exist, list available jobs.
 2. Show the job's prompt and ask for confirmation: "Run job '<name>' now?" (header: "Run", options: "Yes", "No")
 3. If confirmed, run the prompt by executing:
    ```bash
@@ -80,7 +80,7 @@ Manually trigger a cron job immediately (useful for testing).
 
 ## Reference: Job File Format
 
-Jobs live in `.claude/claudeclaw/jobs/` as markdown files:
+Jobs live in `.claude/hermes/jobs/` as markdown files:
 
 ```markdown
 ---

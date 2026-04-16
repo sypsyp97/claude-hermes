@@ -1,1 +1,0 @@
-export { htmlPage } from "./template";

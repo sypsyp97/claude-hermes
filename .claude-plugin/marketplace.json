@@ -1,11 +1,11 @@
 {
-  "name": "claudeclaw",
+  "name": "claude-hermes",
   "owner": {
     "name": "moazbuilds"
   },
   "plugins": [
     {
-      "name": "claudeclaw",
+      "name": "claude-hermes",
       "source": "./",
       "description": "Cron-like daemon that runs Claude prompts on a schedule",
       "version": "1.0.0",

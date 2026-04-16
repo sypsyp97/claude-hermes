@@ -18,13 +18,13 @@ try {
   // List files in the skill directory via GitHub API
   const apiUrl = `https://api.github.com/repos/${repo}/contents/skills/${skillName}`;
   const res = await fetch(apiUrl, {
-    headers: { "User-Agent": "claudeclaw-skill-installer" },
+    headers: { "User-Agent": "claude-hermes-skill-installer" },
   });
 
   if (!res.ok) {
     // Try root-level skill (some repos put SKILL.md at root)
     const rootRes = await fetch(`https://api.github.com/repos/${repo}/contents/${skillName}`, {
-      headers: { "User-Agent": "claudeclaw-skill-installer" },
+      headers: { "User-Agent": "claude-hermes-skill-installer" },
     });
     if (!rootRes.ok) {
       console.log(JSON.stringify({ error: `Skill not found at skills/${skillName} or ${skillName} in ${repo}` }));

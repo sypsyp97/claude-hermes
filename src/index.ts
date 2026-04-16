@@ -10,21 +10,21 @@ const args = process.argv.slice(2);
 const command = args[0];
 
 if (command === "--stop-all") {
-  stopAll();
+  await stopAll();
 } else if (command === "--stop") {
-  stop();
+  await stop();
 } else if (command === "--clear") {
-  clear();
+  await clear();
 } else if (command === "start") {
-  start(args.slice(1));
+  await start(args.slice(1));
 } else if (command === "status") {
-  status(args.slice(1));
+  await status(args.slice(1));
 } else if (command === "telegram") {
-  telegram();
+  await telegram();
 } else if (command === "discord") {
-  discord();
+  await discord();
 } else if (command === "send") {
-  send(args.slice(1));
+  await send(args.slice(1));
 } else {
-  start();
+  await start();
 }

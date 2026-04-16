@@ -1,7 +1,6 @@
 import { readdir } from "fs/promises";
 import { join } from "path";
-
-const JOBS_DIR = join(process.cwd(), ".claude", "claudeclaw", "jobs");
+import { jobsDir } from "./paths";
 
 export interface Job {
   name: string;
@@ -56,16 +55,17 @@ function parseJobFile(name: string, content: string): Job | null {
 
 export async function loadJobs(): Promise<Job[]> {
   const jobs: Job[] = [];
+  const dir = jobsDir();
   let files: string[];
   try {
-    files = await readdir(JOBS_DIR);
+    files = await readdir(dir);
   } catch {
     return jobs;
   }
 
   for (const file of files) {
     if (!file.endsWith(".md")) continue;
-    const content = await Bun.file(join(JOBS_DIR, file)).text();
+    const content = await Bun.file(join(dir, file)).text();
     const job = parseJobFile(file.replace(/\.md$/, ""), content);
     if (job) jobs.push(job);
   }
@@ -73,7 +73,7 @@ export async function loadJobs(): Promise<Job[]> {
 }
 
 export async function clearJobSchedule(jobName: string): Promise<void> {
-  const path = join(JOBS_DIR, `${jobName}.md`);
+  const path = join(jobsDir(), `${jobName}.md`);
   const content = await Bun.file(path).text();
   const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
   if (!match) return;
