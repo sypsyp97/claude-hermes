@@ -25,5 +25,14 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Audit dependencies
+        run: bun audit
+
+      - name: Lint workflow files
+        if: matrix.os == 'ubuntu-latest'
+        uses: raven-actions/actionlint@v2
+        with:
+          fail_on_error: true
+
       - name: Verify (typecheck + lint + unit + smoke + integration)
         run: bun run verify
