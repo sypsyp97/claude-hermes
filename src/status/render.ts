@@ -47,6 +47,7 @@ export function createRenderer(taskLabel: string, startedAt?: number): Renderer 
   const start = startedAt ?? Date.now();
   const tools: ToolEntry[] = [];
   let totalTools = 0;
+  let replyChars = 0;
 
   function apply(event: StatusEvent): void {
     if (event.kind === "tool_use_start") {
@@ -58,6 +59,8 @@ export function createRenderer(taskLabel: string, startedAt?: number): Renderer 
         entry.state = event.ok ? "ok" : "error";
         if (!event.ok) entry.errorShort = event.errorShort;
       }
+    } else if (event.kind === "text_delta") {
+      replyChars += event.text.length;
     }
   }
 
@@ -68,6 +71,9 @@ export function createRenderer(taskLabel: string, startedAt?: number): Renderer 
   function render(now?: number): string {
     const secs = elapsedSeconds(now);
     const lines: string[] = [`⏳ Hermes working… (${secs}s) — ${taskLabel}`];
+    if (replyChars > 0) {
+      lines.push(`✍️ Writing reply… (${replyChars} chars)`);
+    }
     const hiddenCount = Math.max(0, tools.length - MAX_VISIBLE_TOOLS);
     if (hiddenCount > 0) {
       lines.push(`… +${hiddenCount} earlier tool${hiddenCount === 1 ? "" : "s"}`);

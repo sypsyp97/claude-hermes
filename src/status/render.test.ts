@@ -160,3 +160,137 @@ describe("createRenderer — message width", () => {
     expect(text.length).toBeLessThan(2000);
   });
 });
+
+describe("createRenderer — streaming reply text", () => {
+  test("single text_delta renders writing reply line with char count", () => {
+    const r = createRenderer("x", 0);
+    r.apply({ kind: "text_delta", text: "hello" });
+    const text = r.render(1000);
+    expect(text).toContain("✍️ Writing reply… (5 chars)");
+  });
+
+  test("multiple text_deltas accumulate character count", () => {
+    const r = createRenderer("x", 0);
+    r.apply({ kind: "text_delta", text: "hello" });
+    r.apply({ kind: "text_delta", text: " world" });
+    const text = r.render(1000);
+    expect(text).toContain("✍️ Writing reply… (11 chars)");
+  });
+
+  test("no text_deltas means no writing reply line", () => {
+    const r = createRenderer("x", 0);
+    const text = r.render(1000);
+    expect(text).not.toContain("Writing reply");
+  });
+
+  test("empty-string text_delta does not render the writing reply line", () => {
+    const r = createRenderer("x", 0);
+    r.apply({ kind: "text_delta", text: "" });
+    const text = r.render(1000);
+    expect(text).not.toContain("Writing reply");
+  });
+
+  test("writing reply line appears immediately after header and before tool lines", () => {
+    const r = createRenderer("task-label", 0);
+    r.apply({ kind: "text_delta", text: "hi" });
+    r.apply({
+      kind: "tool_use_start",
+      toolUseId: "tu-1",
+      name: "Read",
+      input: {},
+      label: "Read(a.ts)",
+    });
+    const text = r.render(1000);
+    const writingIdx = text.indexOf("Writing reply");
+    const toolIdx = text.indexOf("Read(a.ts)");
+    expect(writingIdx).toBeGreaterThanOrEqual(0);
+    expect(toolIdx).toBeGreaterThanOrEqual(0);
+    expect(writingIdx).toBeLessThan(toolIdx);
+
+    const lines = text.split("\n");
+    // Header on line 0, writing on line 1, then tool line(s) after.
+    expect(lines[0]).toContain("Hermes working");
+    expect(lines[1]).toContain("✍️ Writing reply… (2 chars)");
+  });
+
+  test("writing reply line appears before the collapsed earlier-tools summary", () => {
+    const r = createRenderer("x", 0);
+    r.apply({ kind: "text_delta", text: "abc" });
+    for (let i = 0; i < 10; i++) {
+      r.apply({
+        kind: "tool_use_start",
+        toolUseId: `tu-${i}`,
+        name: "Read",
+        input: {},
+        label: `Read(f${i}.ts)`,
+      });
+      r.apply({ kind: "tool_use_end", toolUseId: `tu-${i}`, ok: true });
+    }
+    const text = r.render(1000);
+    const writingIdx = text.indexOf("Writing reply");
+    const collapseMatch = text.match(/\+\s*\d+\s+earlier/);
+    expect(writingIdx).toBeGreaterThanOrEqual(0);
+    expect(collapseMatch).not.toBeNull();
+    const collapseIdx = text.indexOf(collapseMatch![0]);
+    expect(writingIdx).toBeLessThan(collapseIdx);
+  });
+
+  test("interleaved tool + text_delta events produce correct order and count", () => {
+    const r = createRenderer("x", 0);
+    r.apply({
+      kind: "tool_use_start",
+      toolUseId: "tu-1",
+      name: "Read",
+      input: {},
+      label: "Read(a.ts)",
+    });
+    r.apply({ kind: "text_delta", text: "hello" });
+    r.apply({ kind: "tool_use_end", toolUseId: "tu-1", ok: true });
+    r.apply({ kind: "text_delta", text: " world" });
+    const text = r.render(1000);
+    expect(text).toContain("Hermes working");
+    expect(text).toContain("✍️ Writing reply… (11 chars)");
+    const readLine = text.split("\n").find((l) => l.includes("Read(a.ts)")) ?? "";
+    expect(readLine).toContain("✓");
+    const writingIdx = text.indexOf("Writing reply");
+    const toolIdx = text.indexOf("Read(a.ts)");
+    expect(writingIdx).toBeLessThan(toolIdx);
+  });
+
+  test("renderFinal does not include the writing reply line (ok=true)", () => {
+    const r = createRenderer("x", 0);
+    r.apply({ kind: "text_delta", text: "hello" });
+    r.apply({ kind: "text_delta", text: " world" });
+    const text = r.renderFinal({ ok: true }, 5000);
+    expect(text).not.toContain("Writing reply");
+  });
+
+  test("renderFinal does not include the writing reply line (ok=false)", () => {
+    const r = createRenderer("x", 0);
+    r.apply({ kind: "text_delta", text: "some streamed reply" });
+    const text = r.renderFinal({ ok: false, errorShort: "boom" }, 5000);
+    expect(text).not.toContain("Writing reply");
+  });
+
+  test("toolCount counts only tool_use_start events, not text_delta", () => {
+    const r = createRenderer("x", 0);
+    r.apply({ kind: "text_delta", text: "a" });
+    r.apply({ kind: "text_delta", text: "b" });
+    r.apply({ kind: "text_delta", text: "c" });
+    r.apply({
+      kind: "tool_use_start",
+      toolUseId: "tu-1",
+      name: "Read",
+      input: {},
+      label: "Read(a.ts)",
+    });
+    r.apply({
+      kind: "tool_use_start",
+      toolUseId: "tu-2",
+      name: "Edit",
+      input: {},
+      label: "Edit(b.ts)",
+    });
+    expect(r.toolCount()).toBe(2);
+  });
+});
