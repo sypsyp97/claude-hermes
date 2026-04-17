@@ -607,10 +607,25 @@ export async function runCompact(
 /**
  * High-level compact: resolves session + settings internally.
  * Returns { success, message }.
+ *
+ * If `opts.sink` is provided, the sink's open/close lifecycle is driven
+ * around the underlying runCompact call so Discord/Telegram users can see
+ * live status. Sink calls are best-effort and never fail compact.
  */
-export async function compactCurrentSession(): Promise<{ success: boolean; message: string }> {
+export async function compactCurrentSession(
+  opts?: { sink?: StatusSink },
+): Promise<{ success: boolean; message: string }> {
   const existing = await getSession();
   if (!existing) return { success: false, message: "No active session to compact." };
+
+  const sink = opts?.sink;
+  if (sink) {
+    try {
+      await sink.open("compact", "Context compaction");
+    } catch {
+      // sink failures must never break compact
+    }
+  }
 
   const settings = getSettings();
   const securityArgs = buildSecurityArgs(settings.security);
@@ -626,9 +641,25 @@ export async function compactCurrentSession(): Promise<{ success: boolean; messa
     timeoutMs
   );
 
+  const message = ok
+    ? `✅ Session compact complete (${existing.sessionId.slice(0, 8)})`
+    : `❌ Compact failed (${existing.sessionId.slice(0, 8)})`;
+
+  if (sink) {
+    try {
+      if (ok) {
+        await sink.close({ ok: true });
+      } else {
+        await sink.close({ ok: false, errorShort: message });
+      }
+    } catch {
+      // sink failures must never break compact
+    }
+  }
+
   return ok
-    ? { success: true, message: `✅ Session compact complete (${existing.sessionId.slice(0, 8)})` }
-    : { success: false, message: `❌ Compact failed (${existing.sessionId.slice(0, 8)})` };
+    ? { success: true, message }
+    : { success: false, message };
 }
 
 async function execClaude(

@@ -673,7 +673,12 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
 
   if (command === "/compact") {
     await sendMessage(config.token, chatId, "⏳ Compacting session...", threadId);
-    const result = await compactCurrentSession();
+    const sink = createTelegramStatusSink({
+      transport: telegramStatusTransport(config.token),
+      chatId,
+      ...(threadId !== undefined && { threadId }),
+    });
+    const result = await compactCurrentSession({ sink });
     await sendMessage(config.token, chatId, result.message, threadId);
     return;
   }

@@ -463,3 +463,142 @@ describe("extractSessionAndResult", () => {
     expect(runner.extractSessionAndResult(null)).toEqual({});
   });
 });
+
+// --- compactCurrentSession status-sink integration ---
+// When a caller passes `{ sink }`, compactCurrentSession drives the sink's
+// open/close lifecycle around the underlying runCompact. No update() calls
+// are required — the contract only pins open-before and close-after.
+
+interface RecorderSinkCall {
+  kind: "open" | "update" | "close";
+  payload: unknown;
+}
+
+function createRecorderSink() {
+  const calls: RecorderSinkCall[] = [];
+  const sink = {
+    async open(taskId: string, label: string) {
+      calls.push({ kind: "open", payload: { taskId, label } });
+    },
+    async update(event: unknown) {
+      calls.push({ kind: "update", payload: event });
+    },
+    async close(result: unknown) {
+      calls.push({ kind: "close", payload: result });
+    },
+  };
+  return { calls, sink };
+}
+
+describe("compactCurrentSession — status sink", () => {
+  test("happy path: sink sees open then close{ok:true} in order", async () => {
+    // Seed an active session by running a normal turn first.
+    process.env.HERMES_FAKE_SESSION_ID = "compact-sink-happy";
+    process.env.HERMES_FAKE_REPLY = "seed";
+    const seed = await runner.run("compact-sink-seed", "hi");
+    expect(seed.exitCode).toBe(0);
+
+    const { calls, sink } = createRecorderSink();
+    process.env.HERMES_FAKE_REPLY = "compacted";
+    const result = await (
+      runner.compactCurrentSession as unknown as (opts: {
+        sink: unknown;
+      }) => Promise<{ success: boolean; message: string }>
+    )({ sink });
+    expect(result.success).toBe(true);
+
+    const kinds = calls.map((c) => c.kind);
+    const openIdx = kinds.indexOf("open");
+    const closeIdx = kinds.indexOf("close");
+    expect(openIdx).toBeGreaterThanOrEqual(0);
+    expect(closeIdx).toBeGreaterThanOrEqual(0);
+    expect(openIdx).toBeLessThan(closeIdx);
+
+    // Exactly one open, exactly one close.
+    expect(kinds.filter((k) => k === "open").length).toBe(1);
+    expect(kinds.filter((k) => k === "close").length).toBe(1);
+
+    const closeCall = calls[closeIdx]!;
+    const closePayload = closeCall.payload as { ok: boolean };
+    expect(closePayload.ok).toBe(true);
+  });
+
+  test("label passed to open() contains 'compact' (case-insensitive)", async () => {
+    process.env.HERMES_FAKE_SESSION_ID = "compact-sink-label";
+    process.env.HERMES_FAKE_REPLY = "seed";
+    const seed = await runner.run("compact-sink-label-seed", "hi");
+    expect(seed.exitCode).toBe(0);
+
+    const { calls, sink } = createRecorderSink();
+    process.env.HERMES_FAKE_REPLY = "compacted";
+    await (
+      runner.compactCurrentSession as unknown as (opts: {
+        sink: unknown;
+      }) => Promise<{ success: boolean; message: string }>
+    )({ sink });
+
+    const openCall = calls.find((c) => c.kind === "open");
+    expect(openCall).toBeDefined();
+    const { label } = openCall!.payload as { taskId: string; label: string };
+    expect(typeof label).toBe("string");
+    expect(label.toLowerCase()).toContain("compact");
+  });
+
+  test("failure path: close() carries ok=false with a non-empty errorShort", async () => {
+    process.env.HERMES_FAKE_SESSION_ID = "compact-sink-fail";
+    process.env.HERMES_FAKE_REPLY = "seed";
+    const seed = await runner.run("compact-sink-fail-seed", "hi");
+    expect(seed.exitCode).toBe(0);
+
+    // Force the compact invocation to exit non-zero.
+    process.env.HERMES_FAKE_EXIT = "5";
+
+    const { calls, sink } = createRecorderSink();
+    const result = await (
+      runner.compactCurrentSession as unknown as (opts: {
+        sink: unknown;
+      }) => Promise<{ success: boolean; message: string }>
+    )({ sink });
+    expect(result.success).toBe(false);
+
+    const closeCall = calls.find((c) => c.kind === "close");
+    expect(closeCall).toBeDefined();
+    const payload = closeCall!.payload as { ok: boolean; errorShort?: string };
+    expect(payload.ok).toBe(false);
+    expect(typeof payload.errorShort).toBe("string");
+    expect((payload.errorShort ?? "").length).toBeGreaterThan(0);
+  });
+
+  test("no active session: sink.open/close are not called", async () => {
+    // Fresh state — afterEach's resetSession should have cleared anything, but
+    // be explicit to keep the test self-contained.
+    await sessions.resetSession();
+
+    const { calls, sink } = createRecorderSink();
+    const result = await (
+      runner.compactCurrentSession as unknown as (opts: {
+        sink: unknown;
+      }) => Promise<{ success: boolean; message: string }>
+    )({ sink });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toMatch(/No active session/i);
+
+    const kinds = calls.map((c) => c.kind);
+    expect(kinds).not.toContain("open");
+    expect(kinds).not.toContain("close");
+  });
+
+  test("backward compat: compactCurrentSession() with no args still returns {success, message}", async () => {
+    process.env.HERMES_FAKE_SESSION_ID = "compact-sink-compat";
+    process.env.HERMES_FAKE_REPLY = "seed";
+    const seed = await runner.run("compact-sink-compat-seed", "hi");
+    expect(seed.exitCode).toBe(0);
+
+    process.env.HERMES_FAKE_REPLY = "compacted";
+    const result = await runner.compactCurrentSession();
+    expect(typeof result.success).toBe("boolean");
+    expect(typeof result.message).toBe("string");
+    expect(result.success).toBe(true);
+  });
+});

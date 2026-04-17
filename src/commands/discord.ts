@@ -701,7 +701,14 @@ async function handleInteractionCreate(token: string, interaction: DiscordIntera
 
     if (interaction.data.name === "compact") {
       await respondToInteraction(interaction, { content: "⏳ Compacting session..." });
-      const result = await compactCurrentSession();
+      const channelId = interaction.channel_id;
+      const sink = channelId
+        ? createDiscordStatusSink({
+            transport: discordStatusTransport(config.token),
+            channelId,
+          })
+        : undefined;
+      const result = await compactCurrentSession(sink ? { sink } : undefined);
       await fetch(
         `${DISCORD_API}/webhooks/${applicationId}/${interaction.token}/messages/@original`,
         {
