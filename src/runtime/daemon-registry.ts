@@ -25,7 +25,14 @@ export interface DaemonEntry {
 }
 
 export interface RegistryOpts {
-  /** Override the on-disk path. Default: `~/.claude/hermes/daemons.json`. */
+  /**
+   * Override the on-disk path. Resolution precedence:
+   *   1. `opts.path` (explicit caller arg — wins)
+   *   2. `process.env.HERMES_DAEMON_REGISTRY` (used by the daemon-boot
+   *      smoke tests so they don't pollute the user's real
+   *      `~/.claude/hermes/daemons.json`)
+   *   3. `defaultRegistryPath()` (production default)
+   */
   path?: string;
 }
 
@@ -33,16 +40,22 @@ export function defaultRegistryPath(): string {
   return join(homedir(), ".claude", "hermes", "daemons.json");
 }
 
+function resolveRegistryPath(opts: RegistryOpts): string {
+  if (opts.path) return opts.path;
+  const fromEnv = process.env.HERMES_DAEMON_REGISTRY;
+  if (fromEnv && fromEnv.length > 0) return fromEnv;
+  return defaultRegistryPath();
+}
+
 let writeChain: Promise<void> = Promise.resolve();
 
 export async function listDaemons(opts: RegistryOpts = {}): Promise<DaemonEntry[]> {
-  const path = opts.path ?? defaultRegistryPath();
-  return readEntries(path);
+  return readEntries(resolveRegistryPath(opts));
 }
 
 export function registerDaemon(entry: { pid: number; cwd: string }, opts: RegistryOpts = {}): Promise<void> {
   return enqueue(async () => {
-    const path = opts.path ?? defaultRegistryPath();
+    const path = resolveRegistryPath(opts);
     const existing = await readEntries(path);
     const filtered = existing.filter((e) => e.pid !== entry.pid);
     filtered.push({ pid: entry.pid, cwd: entry.cwd, startedAt: new Date().toISOString() });
@@ -52,7 +65,7 @@ export function registerDaemon(entry: { pid: number; cwd: string }, opts: Regist
 
 export function unregisterDaemon(pid: number, opts: RegistryOpts = {}): Promise<void> {
   return enqueue(async () => {
-    const path = opts.path ?? defaultRegistryPath();
+    const path = resolveRegistryPath(opts);
     const existing = await readEntries(path);
     const filtered = existing.filter((e) => e.pid !== pid);
     if (filtered.length === existing.length) return;

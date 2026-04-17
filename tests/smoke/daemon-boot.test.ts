@@ -20,6 +20,12 @@ async function bootDaemon(timeoutMs = 20_000, extraArgs: string[] = []): Promise
   const cwd = await mkdtemp(join(tmpdir(), "hermes-daemon-boot-"));
   await mkdir(join(cwd, ".claude", "hermes"), { recursive: true });
 
+  // Redirect the daemon registry to a per-test tmp file so this smoke test
+  // doesn't write into the host's real ~/.claude/hermes/daemons.json. The
+  // test process inherits this env so its own listDaemons() calls (none
+  // today, but cheap insurance) also see the isolated path.
+  const registryPath = join(cwd, "daemons.json");
+
   const child = spawn("bun", ["run", ENTRY, "start", ...extraArgs], {
     cwd,
     env: {
@@ -27,6 +33,7 @@ async function bootDaemon(timeoutMs = 20_000, extraArgs: string[] = []): Promise
       HERMES_CLAUDE_BIN: `bun run ${FAKE_CLAUDE}`,
       HERMES_SKIP_PREFLIGHT: "1",
       HERMES_FAKE_SESSION_ID: "boot-test-session",
+      HERMES_DAEMON_REGISTRY: registryPath,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -114,6 +121,7 @@ describe("daemon-boot smoke", () => {
         ...process.env,
         HERMES_CLAUDE_BIN: `bun run ${FAKE_CLAUDE}`,
         HERMES_SKIP_PREFLIGHT: "1",
+        HERMES_DAEMON_REGISTRY: join(cwd, "daemons.json"),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });

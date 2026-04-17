@@ -119,6 +119,63 @@ describe("daemon-registry — malformed file recovery", () => {
   });
 });
 
+describe("daemon-registry — HERMES_DAEMON_REGISTRY env var", () => {
+  // Existed because the daemon-boot integration test was polluting the
+  // user's REAL ~/.claude/hermes/daemons.json with stale tmp-dir entries.
+  // The env var lets callers (and that test) point the registry at an
+  // isolated tmp file without threading opts.path through every call.
+
+  test("env var path is used when opts.path is omitted", async () => {
+    const envPath = join(dir, "from-env.json");
+    const prev = process.env.HERMES_DAEMON_REGISTRY;
+    process.env.HERMES_DAEMON_REGISTRY = envPath;
+    try {
+      await registerDaemon({ pid: 555, cwd: "/from-env" });
+      // listDaemons() with no opts should also pick up the env var.
+      const list = await listDaemons();
+      expect(list.map((d) => d.pid)).toContain(555);
+      // And the file should have been written at the env-var path.
+      expect(await readFile(envPath, "utf8")).toContain('"pid": 555');
+    } finally {
+      if (prev === undefined) delete process.env.HERMES_DAEMON_REGISTRY;
+      else process.env.HERMES_DAEMON_REGISTRY = prev;
+      await unregisterDaemon(555, { path: envPath }).catch(() => {});
+    }
+  });
+
+  test("opts.path beats env var (explicit > implicit)", async () => {
+    const envPath = join(dir, "from-env.json");
+    const optsPath = join(dir, "from-opts.json");
+    const prev = process.env.HERMES_DAEMON_REGISTRY;
+    process.env.HERMES_DAEMON_REGISTRY = envPath;
+    try {
+      await registerDaemon({ pid: 666, cwd: "/explicit" }, { path: optsPath });
+      // env-var path stays empty
+      await expect(readFile(envPath, "utf8")).rejects.toThrow();
+      // opts.path got the write
+      expect(await readFile(optsPath, "utf8")).toContain('"pid": 666');
+    } finally {
+      if (prev === undefined) delete process.env.HERMES_DAEMON_REGISTRY;
+      else process.env.HERMES_DAEMON_REGISTRY = prev;
+    }
+  });
+
+  test("empty env var is treated as unset (falls back to default)", async () => {
+    const prev = process.env.HERMES_DAEMON_REGISTRY;
+    process.env.HERMES_DAEMON_REGISTRY = "";
+    try {
+      // We can't write through default safely from a unit test (it would
+      // touch ~/.claude/hermes/daemons.json), so we only assert the
+      // resolution path doesn't throw and that opts.path still wins.
+      await registerDaemon({ pid: 777, cwd: "/x" }, { path: registryPath });
+      expect((await listDaemons({ path: registryPath })).map((d) => d.pid)).toContain(777);
+    } finally {
+      if (prev === undefined) delete process.env.HERMES_DAEMON_REGISTRY;
+      else process.env.HERMES_DAEMON_REGISTRY = prev;
+    }
+  });
+});
+
 describe("daemon-registry — DaemonEntry shape contract", () => {
   test("entries have pid (number), cwd (string), startedAt (ISO-ish)", async () => {
     await registerDaemon({ pid: 111, cwd: "/a" }, { path: registryPath });
