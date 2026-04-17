@@ -25,6 +25,13 @@ import {
 import { type StateData, writeState } from "../statusline";
 import { createJobStatusSink } from "../status/job-sink";
 import { getDayAndMinuteAtOffset } from "../timezone";
+import {
+  detectFirstRun,
+  renderFirstRunGuide,
+  renderWelcomeBanner,
+  runPreflightChecks,
+  seedExampleArtifacts,
+} from "../onboarding";
 
 const PREFLIGHT_SCRIPT = fileURLToPath(new URL("../preflight.ts", import.meta.url));
 
@@ -333,6 +340,39 @@ export async function start(args: string[] = []) {
   await initConfig();
   const settings = await loadSettings();
   await ensureProjectClaudeMd();
+
+  // First-run onboarding: show banner + preflight + guide, and seed example
+  // heartbeat/job files so the user has something to look at. Preflight is
+  // advisory — failures log a warning but do not block startup (the daemon is
+  // still usable with a missing node or outside a git repo).
+  const isFirstRun = detectFirstRun(settings);
+  const preflight = await runPreflightChecks().catch(() => null);
+  if (isFirstRun) {
+    console.log(renderWelcomeBanner());
+    console.log("");
+    if (preflight) {
+      console.log(renderFirstRunGuide({ settings, preflight }));
+      console.log("");
+    }
+    try {
+      const seeded = await seedExampleArtifacts();
+      if (seeded.createdHeartbeatPrompt || seeded.createdExampleJob) {
+        console.log("Seeded example files:");
+        if (seeded.createdHeartbeatPrompt)
+          console.log("  - .claude/hermes/prompts/heartbeat.md");
+        if (seeded.createdExampleJob) console.log("  - .claude/hermes/jobs/example.md");
+        console.log("");
+      }
+    } catch (err) {
+      console.warn(
+        `Could not seed example files: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  } else if (preflight && preflight.problems.length > 0) {
+    console.warn("Preflight warnings:");
+    for (const p of preflight.problems) console.warn(`  - ${p}`);
+  }
+
   const jobs = await loadJobs();
 
   await setupStatusline();

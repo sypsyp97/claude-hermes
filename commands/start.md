@@ -2,7 +2,11 @@
 description: Start daemon mode or run one-shot prompt/trigger
 ---
 
-Start the heartbeat daemon for this project. Follow these steps exactly:
+Start the heartbeat daemon for this project.
+
+**What this will do (tell the user first)**: walk them through a short setup — pick a model, optionally enable a recurring "heartbeat", optionally connect Telegram/Discord, and pick a security level — then launch a background daemon scoped to the current folder. Everything configured here is written to `.claude/hermes/settings.json` and can be edited later without restarting. If it's their very first run, the daemon itself will also print a welcome banner, a preflight health check, and seed two example files (`.claude/hermes/prompts/heartbeat.md`, `.claude/hermes/jobs/example.md`) to show the file shapes.
+
+Follow these steps exactly:
 
 1. **Block home-directory starts (CRITICAL, BLOCKER)**:
    - Run `pwd` and `echo "$HOME"`.
@@ -41,6 +45,8 @@ Start the heartbeat daemon for this project. Follow these steps exactly:
 
 4. **Interactive setup — smart mode** (BEFORE launching the daemon):
 
+   Before asking any questions, give the user a short orientation in one paragraph (2–3 sentences max): "I'll ask you a few quick questions to set this up. Everything is optional except the model, and you can change any answer later by editing `.claude/hermes/settings.json`. All your answers stay on your machine." Do not re-explain this later.
+
    **If ALL three sections are already configured**, show a summary of the current config and ask ONE question:
 
    Use AskUserQuestion:
@@ -57,15 +63,15 @@ Start the heartbeat daemon for this project. Follow these steps exactly:
 
    Use **AskUserQuestion** to ask all unconfigured sections at once (up to 3 questions in one call):
 
-   - **Model** (always ask if `model` is empty/unset): "Which Claude model should Claude Hermes use?" (header: "Model", options: "opus (default)", "sonnet", "haiku", "glm")
-   - **If heartbeat is NOT configured**: "Enable heartbeat? Example: I can remind you to drink water every 30 minutes, or you can fully customize what runs." (header: "Heartbeat", options: "Yes" / "No")
-   - **If Telegram is NOT configured**: "Configure Telegram? Recommended if you want it 24/7 live." (header: "Telegram", options: "Yes" / "No")
-   - **If Discord is NOT configured**: "Configure Discord? Connect your bot to Discord servers." (header: "Discord", options: "Yes" / "No")
-   - **If security is NOT configured**: "What security level for Claude?" (header: "Security", options:
-     - "Moderate (Recommended)" (description: "Full access scoped to project directory")
-     - "Locked" (description: "Read-only — can only search and read files, no edits, bash, or web")
-     - "Strict" (description: "Can edit files but no bash or web access")
-     - "Unrestricted" (description: "Full access with no directory restriction — dangerous"))
+   - **Model** (always ask if `model` is empty/unset): "Which Claude model should Claude Hermes use? Opus is most capable but costs more; Sonnet is a good balance; Haiku is cheapest/fastest; GLM requires a separate Zhipu API token." (header: "Model", options: "opus (Recommended)", "sonnet", "haiku", "glm")
+   - **If heartbeat is NOT configured**: "Enable heartbeat? The daemon will wake itself up on a fixed interval and run a prompt you write (e.g. 'review git status', 'check open PRs', 'remind me to drink water'). You can skip this and turn it on later." (header: "Heartbeat", options: "Yes", "No — skip for now")
+   - **If Telegram is NOT configured**: "Configure Telegram? This lets you chat with the daemon from your phone via your own bot. You'll need a token from @BotFather (takes ~30 seconds)." (header: "Telegram", options: "Yes", "No — skip for now")
+   - **If Discord is NOT configured**: "Configure Discord? Connects the daemon to DMs and channels you invite the bot to. You'll need a token from discord.com/developers (takes ~1 minute)." (header: "Discord", options: "Yes", "No — skip for now")
+   - **If security is NOT configured**: "What security level for Claude? This controls which tools the daemon is allowed to use without asking. You can change it any time by editing settings.json." (header: "Security", options:
+     - "Moderate (Recommended)" (description: "Full tool access, scoped to this project folder — good default for dev work")
+     - "Locked" (description: "Read-only — Read/Grep/Glob only. No edits, no Bash, no web. Safest for exploration.")
+     - "Strict" (description: "Can edit files but no Bash, no web. Middle ground.")
+     - "Unrestricted" (description: "Full access with NO directory scoping — only pick this if you know why you need it."))
 
    Then, based on their answers:
 
@@ -110,6 +116,8 @@ Start the heartbeat daemon for this project. Follow these steps exactly:
      - If they pick an option with tools or type custom ones, set `security.allowedTools` to the list.
 
    Update `.claude/hermes/settings.json` with their answers.
+
+   After writing settings, tell the user — in one short paragraph — what will happen next: "Launching the daemon now. On first run it prints a welcome banner, a preflight health check (claude CLI, node, git repo, writable `.claude/hermes`), and seeds two example files (`prompts/heartbeat.md` and `jobs/example.md`) so you can see the file shapes. After that the daemon stays running in the background — check the log at `.claude/hermes/logs/daemon.log` if anything looks off."
 
 6. **Launch/start action**:
    ```bash
