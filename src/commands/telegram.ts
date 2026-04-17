@@ -754,28 +754,6 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     return;
   }
 
-  // Secretary: detect reply to a bot alert message → treat as custom reply
-  const replyToMsgId = message.reply_to_message?.message_id;
-  if (replyToMsgId && text && botId && message.reply_to_message?.from?.id === botId) {
-    try {
-      const lookupResp = await fetch(`http://127.0.0.1:9999/pending/by-bot-msg/${replyToMsgId}`);
-      if (lookupResp.ok) {
-        const item = await lookupResp.json() as { id?: string } | null;
-        if (item?.id) {
-          await fetch(`http://127.0.0.1:9999/confirm/${item.id}/custom`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text }),
-          });
-          await sendMessage(config.token, chatId, `✅ Sent custom reply + pattern learned.`, threadId);
-          return;
-        }
-      }
-    } catch {
-      // fall through to normal handling if secretary endpoint unreachable
-    }
-  }
-
   const label = message.from?.username ?? String(userId ?? "unknown");
   const mediaParts = [hasImage ? "image" : "", hasVoice ? "voice" : "", hasDocument ? "doc" : ""].filter(Boolean);
   const mediaSuffix = mediaParts.length > 0 ? ` [${mediaParts.join("+")}]` : "";
@@ -926,8 +904,7 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
   const config = getSettings().telegram;
 
   // Fail-closed auth: an empty allowlist rejects everyone, and any
-  // non-allowlisted caller is rejected with a polite toast before we
-  // ever open a socket to the local secretary endpoint.
+  // non-allowlisted caller gets a polite toast and we drop the query.
   const fromId = query.from?.id;
   if (
     config.allowedUserIds.length === 0 ||
@@ -941,38 +918,8 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
     return;
   }
 
-  const data = query.data ?? "";
-
-  // Secretary pattern: "sec_yes_<8hex>" or "sec_no_<8hex>"
-  const secMatch = data.match(/^sec_(yes|no)_([0-9a-f]{8})$/);
-  if (secMatch) {
-    const action = secMatch[1];
-    const pendingId = secMatch[2];
-    let answerText = "⚠️ Server error";
-    try {
-      const resp = await fetch(`http://127.0.0.1:9999/confirm/${pendingId}/${action}`);
-      const result = await resp.json() as { ok: boolean };
-      answerText = action === "yes" && result.ok ? "✅ Đã gửi!" : result.ok ? "❌ Dismissed" : "⚠️ Not found";
-      if (query.message) {
-        const statusLine = action === "yes" ? "\n\n✅ Sent" : "\n\n❌ Dismissed";
-        const newText = (query.message.text ?? "").replace(/\n\nReply:.*$/s, statusLine);
-        await callApi(config.token, "editMessageText", {
-          chat_id: query.message.chat.id,
-          message_id: query.message.message_id,
-          text: newText,
-        }).catch(() => {});
-      }
-    } catch {
-      // server not running or error
-    }
-    await callApi(config.token, "answerCallbackQuery", {
-      callback_query_id: query.id,
-      text: answerText,
-    }).catch(() => {});
-    return;
-  }
-
-  // Default: ack with no text
+  // No callback patterns are handled today — ack with no text so Telegram
+  // stops the spinner on the user's button.
   await callApi(config.token, "answerCallbackQuery", { callback_query_id: query.id }).catch(() => {});
 }
 

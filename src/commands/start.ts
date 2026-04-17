@@ -14,6 +14,7 @@ import { type Job, clearJobSchedule, loadJobs } from "../jobs";
 import { executeScheduledJob } from "../scheduler";
 import { migrateIfNeeded } from "../migrate/legacy";
 import { checkExistingDaemon, cleanupPidFile, writePidFile } from "../pid";
+import { registerDaemon, unregisterDaemon } from "../runtime/daemon-registry";
 import {
   bootstrap,
   ensureProjectClaudeMd,
@@ -335,11 +336,18 @@ export async function start(args: string[] = []) {
 
   await setupStatusline();
   await writePidFile();
+  // Append to the cross-project registry so `hermes --stop-all` can find us
+  // by pid + cwd instead of trying to reverse Claude's project-slug encoding.
+  // Best-effort — a registry write failure must not block daemon startup.
+  await registerDaemon({ pid: process.pid, cwd: process.cwd() }).catch((err) => {
+    console.warn(`[${ts()}] Failed to register daemon: ${err instanceof Error ? err.message : err}`);
+  });
   let discordStopGateway: (() => void) | null = null;
 
   async function shutdown() {
     if (discordStopGateway) discordStopGateway();
     await teardownStatusline();
+    await unregisterDaemon(process.pid).catch(() => {});
     await cleanupPidFile();
     process.exit(0);
   }

@@ -1,5 +1,5 @@
 /**
- * Regression tests for five concrete bugs discovered in the Hermes codebase.
+ * Regression tests for concrete bugs discovered in the Hermes codebase.
  * Each test describes correct behavior that the code does NOT yet exhibit, so
  * these are expected to FAIL on the current tree. A separate fixer pass is
  * expected to drive them green without touching the assertions.
@@ -10,10 +10,12 @@
  *          thread sessions created from Telegram land under source='cli'.
  *   Bug 3  start.ts double-opens state.db by calling bootstrapState() after
  *          bootstrap(); shared-db.ts owns the single handle.
- *   Bug 4  handleCallbackQuery does not check allowedUserIds before hitting
- *          the 127.0.0.1:9999 secretary endpoint.
  *   Bug 5  "Allowed users: all" banner is a lie after the fail-closed
  *          commit — an empty allowlist means NOBODY, not everybody.
+ *
+ * Bug 4 (handleCallbackQuery secretary auth gate) was retired alongside the
+ * removal of the 127.0.0.1:9999 secretary integration; no callback-button
+ * patterns remain to gate.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -119,74 +121,21 @@ describe("Bug 3 — start.ts must not call bootstrapState() (shared-db is sole o
 });
 
 // ---------------------------------------------------------------------------
-// Bug 4: handleCallbackQuery must check allowedUserIds before fetching
+// Bug 4 retired alongside the secretary integration — see header comment.
+// Guard: secretary endpoint must not creep back in.
 // ---------------------------------------------------------------------------
 
-describe("Bug 4 — telegram handleCallbackQuery must enforce the allowlist", () => {
-  test("contract: handleCallbackQuery body references both query.from.id and allowedUserIds", () => {
-    // handleCallbackQuery is not exported. The authz fix must land inside
-    // its body (src/commands/telegram.ts:924). A compliant implementation
-    // references both `query.from.id` (the caller identity) and
-    // `allowedUserIds` (the fail-closed list). With the current fail-closed
-    // contract, an empty allowlist rejects everyone.
-    const src = readFileSync(join(REPO_ROOT, "src", "commands", "telegram.ts"), "utf8");
-
-    // Extract the function body. Match from the declaration until the next
-    // top-level `async function` / `function` or the `// --- ` section
-    // divider that follows it in the file.
-    const declRe = /async function handleCallbackQuery\s*\([^)]*\)\s*:\s*Promise<void>\s*\{/;
-    const declMatch = declRe.exec(src);
-    expect(declMatch).not.toBeNull();
-    if (!declMatch) return;
-
-    const bodyStart = declMatch.index + declMatch[0].length;
-    // Balance braces to find the matching close.
-    let depth = 1;
-    let i = bodyStart;
-    for (; i < src.length && depth > 0; i++) {
-      const ch = src[i];
-      if (ch === "{") depth++;
-      else if (ch === "}") depth--;
+describe("secretary integration removed", () => {
+  test("no source file references 127.0.0.1:9999 anymore", () => {
+    const files = [
+      join(REPO_ROOT, "src", "commands", "telegram.ts"),
+      join(REPO_ROOT, "src", "commands", "discord.ts"),
+    ];
+    for (const f of files) {
+      const src = readFileSync(f, "utf8");
+      expect(src).not.toContain("127.0.0.1:9999");
+      expect(src).not.toMatch(/sec_(yes|no)_\[/);
     }
-    const body = src.slice(bodyStart, i - 1);
-
-    // The fix must reference the caller's id AND the allowlist. Accept
-    // either `query.from.id` or a destructured equivalent like
-    // `const fromId = query.from?.id` — any token that contains both
-    // "from" and ".id" within one handful of chars. Keep this loose so
-    // we test the behaviour, not the exact phrasing.
-    const referencesFromId = /query\.from\??\.id/.test(body) || /from\.id/.test(body);
-    const referencesAllowlist = /allowedUserIds/.test(body);
-
-    expect(referencesFromId).toBe(true);
-    expect(referencesAllowlist).toBe(true);
-  });
-
-  test("behaviour: an unauthorised callback query must NOT hit the secretary fetch endpoint", async () => {
-    // The real handleCallbackQuery is unexported, so we drive the contract
-    // from the outside: stand up a fake secretary on 127.0.0.1:9999, then
-    // post a Telegram callback-query update to the polling loop entry that
-    // is reachable — or, if no ingress is exposed, re-run the contract
-    // assertion that is guaranteed to exercise the fix path. Because there
-    // IS no public ingress yet, we fall back to a structural check: the
-    // module body must guard the fetch with an allowlist comparison before
-    // the `fetch("http://127.0.0.1:9999/confirm/...")` line.
-    const src = readFileSync(join(REPO_ROOT, "src", "commands", "telegram.ts"), "utf8");
-
-    // Look at the region that spans from the handleCallbackQuery declaration
-    // until the fetch URL literal. The allowlist check must appear BEFORE
-    // the fetch on the 127.0.0.1:9999 endpoint.
-    const declIdx = src.indexOf("async function handleCallbackQuery");
-    expect(declIdx).toBeGreaterThan(-1);
-
-    const fetchIdx = src.indexOf("127.0.0.1:9999/confirm/", declIdx);
-    expect(fetchIdx).toBeGreaterThan(-1);
-
-    const prefix = src.slice(declIdx, fetchIdx);
-    // The guard must reject non-allowlisted users before we ever open a
-    // socket to the local secretary. That means we must see a comparison
-    // against allowedUserIds in this prefix.
-    expect(prefix).toMatch(/allowedUserIds/);
   });
 });
 

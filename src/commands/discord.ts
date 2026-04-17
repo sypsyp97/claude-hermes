@@ -673,7 +673,7 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
   }
 }
 
-// --- Interaction handler (slash commands + secretary buttons) ---
+// --- Interaction handler (slash commands + button acks) ---
 
 async function handleInteractionCreate(token: string, interaction: DiscordInteraction): Promise<void> {
   const config = getSettings().discord;
@@ -810,38 +810,9 @@ async function handleInteractionCreate(token: string, interaction: DiscordIntera
     return;
   }
 
-  // Button interactions (type 3) — secretary workflow
+  // Button interactions (type 3): no patterns are handled today, just ack
+  // ephemerally so Discord stops the spinner.
   if (interaction.type === 3 && interaction.data?.custom_id) {
-    const customId = interaction.data.custom_id;
-
-    // Secretary pattern: "sec_yes_<8hex>" or "sec_no_<8hex>"
-    const secMatch = customId.match(/^sec_(yes|no)_([0-9a-f]{8})$/);
-    if (secMatch) {
-      const action = secMatch[1];
-      const pendingId = secMatch[2];
-      let responseText = "Server error";
-
-      try {
-        const resp = await fetch(`http://127.0.0.1:9999/confirm/${pendingId}/${action}`);
-        const result = (await resp.json()) as { ok: boolean };
-        responseText =
-          action === "yes" && result.ok
-            ? "Sent!"
-            : result.ok
-              ? "Dismissed"
-              : "Not found";
-      } catch {
-        // server not running
-      }
-
-      await respondToInteraction(interaction, {
-        content: responseText,
-        flags: 64, // EPHEMERAL
-      });
-      return;
-    }
-
-    // Default button ack
     await respondToInteraction(interaction, { content: "OK", flags: 64 });
     return;
   }

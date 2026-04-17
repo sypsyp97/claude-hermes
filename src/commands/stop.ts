@@ -1,8 +1,8 @@
-import { writeFile, unlink, readdir, readFile } from "fs/promises";
+import { unlink, writeFile } from "fs/promises";
 import { join } from "path";
-import { homedir } from "os";
-import { getPidPath, cleanupPidFile } from "../pid";
+import { cleanupPidFile, getPidPath } from "../pid";
 import { claudeDir, hermesDir, pidFile } from "../paths";
+import { listDaemons, unregisterDaemon } from "../runtime/daemon-registry";
 
 // NOTE: these paths MUST be resolved lazily on every call. Capturing them at
 // module load would freeze them to whatever process.cwd() was when the module
@@ -52,6 +52,10 @@ export async function stop() {
 
   await cleanupPidFile();
   await teardownStatusline();
+  // Drop our entry from the cross-project registry. The daemon's own SIGTERM
+  // handler does this too, but we strip it here as belt-and-suspenders in
+  // case it died without unregistering.
+  await unregisterDaemon(Number(pid)).catch(() => {});
 
   try {
     await unlink(join(hermesDir(), "state.json"));
@@ -63,35 +67,40 @@ export async function stop() {
 }
 
 export async function stopAll() {
-  const projectsDir = join(homedir(), ".claude", "projects");
-  let dirs: string[];
-  try {
-    dirs = await readdir(projectsDir);
-  } catch {
-    console.log("No projects found.");
+  // Source of truth is the cross-project registry (~/.claude/hermes/daemons.json).
+  // We used to scan ~/.claude/projects/ and reverse Claude's slug encoding,
+  // which broke entirely on Windows (path was `/C//...` instead of `C:\...`)
+  // and silently lost any project whose folder name contained a hyphen
+  // (e.g. `~/projects/my-app` → reconstructed as `~/projects/my/app`).
+  const entries = await listDaemons();
+
+  if (entries.length === 0) {
+    console.log("No running daemons found.");
     process.exit(0);
   }
 
   let found = 0;
-  for (const dir of dirs) {
-    const projectPath = "/" + dir.slice(1).replace(/-/g, "/");
-    const pidFilePath = pidFile(projectPath);
-
-    let pid: string;
+  for (const entry of entries) {
+    // Skip entries whose pid is already dead — registers without a clean
+    // shutdown leave stale rows behind. We unregister them here so the file
+    // self-heals over time.
     try {
-      pid = (await readFile(pidFilePath, "utf-8")).trim();
-      process.kill(Number(pid), 0);
+      process.kill(entry.pid, 0);
     } catch {
+      await unregisterDaemon(entry.pid).catch(() => {});
       continue;
     }
 
     found++;
     try {
-      process.kill(Number(pid), "SIGTERM");
-      console.log(`\x1b[33m■ Stopped\x1b[0m PID ${pid} — ${projectPath}`);
-      try { await unlink(pidFilePath); } catch {}
+      process.kill(entry.pid, "SIGTERM");
+      console.log(`\x1b[33m■ Stopped\x1b[0m PID ${entry.pid} — ${entry.cwd}`);
+      // Best-effort pid-file cleanup at the daemon's own cwd. The daemon's
+      // SIGTERM handler will also do this, but we don't wait for it.
+      try { await unlink(pidFile(entry.cwd)); } catch {}
+      await unregisterDaemon(entry.pid).catch(() => {});
     } catch {
-      console.log(`\x1b[31m✗ Failed to stop\x1b[0m PID ${pid} — ${projectPath}`);
+      console.log(`\x1b[31m✗ Failed to stop\x1b[0m PID ${entry.pid} — ${entry.cwd}`);
     }
   }
 
