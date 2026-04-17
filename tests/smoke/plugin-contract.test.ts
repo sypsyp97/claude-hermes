@@ -86,21 +86,6 @@ describe("plugin install-time contract", () => {
     expect(missing).toEqual([]);
   });
 
-  test("hooks/hooks.json references a script that exists in package.json", async () => {
-    const hookText = await readFile(join(REPO_ROOT, "hooks", "hooks.json"), "utf8");
-    const hooks = JSON.parse(hookText) as { hooks?: Record<string, string> };
-    const pkgText = await readFile(join(REPO_ROOT, "package.json"), "utf8");
-    const pkg = JSON.parse(pkgText) as { scripts?: Record<string, string> };
-    const scripts = pkg.scripts ?? {};
-
-    for (const [hook, command] of Object.entries(hooks.hooks ?? {})) {
-      // commands look like "bun run verify:fast" — extract the script name.
-      const m = command.match(/bun run (\S+)/);
-      if (!m) continue;
-      expect(scripts[m[1]], `hook "${hook}" references missing package.json script "${m[1]}"`).toBeDefined();
-    }
-  });
-
   test("AGENTS.md exists and pins the agent contract sections", async () => {
     // AGENTS.md is the entry point for autonomous agents. Renaming sections
     // breaks discovery for evolve loops and third-party agent SDKs that index

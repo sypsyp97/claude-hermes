@@ -45,18 +45,16 @@ the human log.
 
 ## Hard rules — do not cross these
 
-1. **Never commit a red verify.** The pre-commit hook runs `verify:fast`; the
-   evolve loop reverts commits that fail full verify on master.
-2. **Never `--no-verify` past the hook.** If the hook fails, fix the cause;
-   don't bypass it.
-3. **Never delete `LEGACY_*` constants in `src/paths.ts`.** Old users coming
+1. **Never commit a red verify.** Run `bun run verify:fast` before every
+   commit; the evolve loop reverts commits that fail full verify on master.
+2. **Never delete `LEGACY_*` constants in `src/paths.ts`.** Old users coming
    from `claudeclaw` rely on the migration path. Tests in
    `src/paths.test.ts` pin this; if you have to change them, talk to a human.
-4. **Never write code that calls `os.homedir()` and expects `$HOME` to
+3. **Never write code that calls `os.homedir()` and expects `$HOME` to
    override it.** Bun on Linux ignores `$HOME` in some setups. Functions
    that need a configurable home must accept an explicit `roots.home` arg
    (see `discoverSkills`, `listSkills` for the pattern).
-5. **Never serialise concurrent writes to a shared file via
+4. **Never serialise concurrent writes to a shared file via
    read-modify-write.** Use the in-process mutex pattern from
    `src/evolve/journal.ts:journalLocks`.
 

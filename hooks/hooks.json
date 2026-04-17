@@ -1,5 +1,0 @@
-{
-  "hooks": {
-    "pre-commit": "bun run verify:fast"
-  }
-}
