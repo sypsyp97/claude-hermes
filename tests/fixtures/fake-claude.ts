@@ -169,8 +169,15 @@ async function main() {
 
   switch (args.outputFormat) {
     case "json": {
-      const payload = { session_id: sessionId, result: reply, model: args.model ?? "fake" };
-      process.stdout.write(JSON.stringify(payload) + "\n");
+      // Mirror the real CLI: a JSON array of envelopes (system.init → … →
+      // result), not a single object. The daemon's runner handles both
+      // shapes but we want tests to exercise the real-world one.
+      const envelopes = [
+        { type: "system", subtype: "init", session_id: sessionId, model: args.model ?? "fake" },
+        { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: reply }] } },
+        { type: "result", subtype: "success", session_id: sessionId, result: reply, num_turns: 1 },
+      ];
+      process.stdout.write(JSON.stringify(envelopes) + "\n");
       break;
     }
     case "stream-json": {

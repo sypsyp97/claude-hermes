@@ -354,6 +354,42 @@ async function runClaudeOnceStreaming(
   }
 }
 
+/**
+ * Pull session_id + final reply text from the buffered `--output-format json`
+ * response. Newer Claude CLI (≥ late-2025) emits a JSON array of events —
+ * like stream-json concatenated — while the legacy CLI and our fake fixture
+ * emit a single `{session_id,result}` object. Both shapes are accepted so
+ * the daemon doesn't regress on either side.
+ */
+export function extractSessionAndResult(
+  parsed: unknown,
+): { sessionId?: string; result?: string } {
+  if (Array.isArray(parsed)) {
+    let sessionId: string | undefined;
+    let result: string | undefined;
+    for (const ev of parsed) {
+      if (!ev || typeof ev !== "object") continue;
+      const e = ev as Record<string, unknown>;
+      if (typeof e.session_id === "string" && !sessionId) {
+        sessionId = e.session_id;
+      }
+      if (e.type === "result") {
+        if (typeof e.session_id === "string") sessionId = e.session_id;
+        if (typeof e.result === "string") result = e.result;
+      }
+    }
+    return { sessionId, result };
+  }
+  if (parsed && typeof parsed === "object") {
+    const o = parsed as Record<string, unknown>;
+    return {
+      sessionId: typeof o.session_id === "string" ? o.session_id : undefined,
+      result: typeof o.result === "string" ? o.result : undefined,
+    };
+  }
+  return {};
+}
+
 function dirScopePrompt(): string {
   return [
     `CRITICAL SECURITY CONSTRAINT: You are scoped to the project directory: ${process.cwd()}`,
@@ -750,9 +786,13 @@ async function execClaude(
       }
     } else {
       try {
-        const json = JSON.parse(rawStdout);
-        sessionId = json.session_id;
-        stdout = json.result ?? "";
+        const parsed = JSON.parse(rawStdout);
+        const extracted = extractSessionAndResult(parsed);
+        if (!extracted.sessionId) {
+          throw new Error("no session_id in claude --output-format json response");
+        }
+        sessionId = extracted.sessionId;
+        stdout = extracted.result ?? "";
         if (threadId) {
           await createThreadSession(source, threadId, sessionId);
           console.log(`[${new Date().toLocaleTimeString()}] Thread session created: ${sessionId} (thread ${threadId.slice(0, 8)})`);

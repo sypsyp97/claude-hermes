@@ -44,10 +44,13 @@ describe("fake-claude fixture smoke", () => {
     const result = await runFake(["-p", "hello", "--output-format", "json"]);
     expect(result.exitCode).toBe(0);
 
-    const parsed = JSON.parse(result.stdout.trim());
-    expect(typeof parsed.session_id).toBe("string");
-    expect(parsed.session_id.length).toBeGreaterThan(0);
-    expect(parsed.result).toBe("ok");
+    const parsed = JSON.parse(result.stdout.trim()) as Array<Record<string, unknown>>;
+    expect(Array.isArray(parsed)).toBe(true);
+    const resultEv = parsed.find((ev) => ev.type === "result");
+    expect(resultEv).toBeDefined();
+    expect(typeof resultEv?.session_id).toBe("string");
+    expect((resultEv?.session_id as string).length).toBeGreaterThan(0);
+    expect(resultEv?.result).toBe("ok");
   }, 15_000);
 
   test("env overrides set session_id and reply body", async () => {
@@ -57,9 +60,10 @@ describe("fake-claude fixture smoke", () => {
     });
     expect(result.exitCode).toBe(0);
 
-    const parsed = JSON.parse(result.stdout.trim());
-    expect(parsed.session_id).toBe("abc123");
-    expect(parsed.result).toBe("hi");
+    const parsed = JSON.parse(result.stdout.trim()) as Array<Record<string, unknown>>;
+    const resultEv = parsed.find((ev) => ev.type === "result");
+    expect(resultEv?.session_id).toBe("abc123");
+    expect(resultEv?.result).toBe("hi");
   }, 15_000);
 
   test("stream-json emits three NDJSON events: system, assistant, result", async () => {

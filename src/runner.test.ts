@@ -432,3 +432,34 @@ describe("runner.run with a StatusSink", () => {
     }
   });
 });
+
+describe("extractSessionAndResult", () => {
+  test("parses the array-of-envelopes shape the real CLI emits", () => {
+    const payload = [
+      { type: "system", subtype: "init", session_id: "abc", model: "x" },
+      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "hey" }] } },
+      { type: "result", subtype: "success", session_id: "abc", result: "hey", num_turns: 1 },
+    ];
+    expect(runner.extractSessionAndResult(payload)).toEqual({ sessionId: "abc", result: "hey" });
+  });
+
+  test("accepts the legacy single-object shape for backwards compatibility", () => {
+    expect(runner.extractSessionAndResult({ session_id: "s1", result: "r1" })).toEqual({
+      sessionId: "s1",
+      result: "r1",
+    });
+  });
+
+  test("prefers the result envelope's session_id over the init envelope's", () => {
+    const payload = [
+      { type: "system", subtype: "init", session_id: "init-sid" },
+      { type: "result", subtype: "success", session_id: "final-sid", result: "ok" },
+    ];
+    expect(runner.extractSessionAndResult(payload)).toEqual({ sessionId: "final-sid", result: "ok" });
+  });
+
+  test("returns empty object for a non-object/array payload", () => {
+    expect(runner.extractSessionAndResult("nope")).toEqual({});
+    expect(runner.extractSessionAndResult(null)).toEqual({});
+  });
+});
