@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -264,4 +264,316 @@ describe("stop command", () => {
       await rm(cwdB, { recursive: true, force: true }).catch(() => {});
     }
   }, 30_000);
+
+  // ---------------------------------------------------------------------
+  // PL-1: stopAll() self-destructs when invoked from inside a
+  // hermes-spawned Claude child.
+  //
+  // If a skill running in a daemon's Claude child calls `--stop-all`,
+  // the current implementation SIGTERMs every row in the registry —
+  // including the daemon that is awaiting the skill's reply.
+  //
+  // Agreed fix: the daemon sets HERMES_PARENT_PID=<daemon-pid> in the
+  // env of any child it spawns. stopAll() reads
+  // process.env.HERMES_PARENT_PID and skips that pid, leaving its
+  // pid-file and registry row alone.
+  // ---------------------------------------------------------------------
+  test("PL-1: stopAll() skips the parent daemon pid from HERMES_PARENT_PID", async () => {
+    // Two dummy daemons: dummy-1 impersonates the *parent* daemon (the
+    // one whose Claude child is invoking --stop-all). dummy-2 is any
+    // other daemon in the registry — stopAll should happily SIGTERM it.
+    const pidsToKill: number[] = [];
+    const dirsToClean: string[] = [];
+
+    const spawnDummy = (): Promise<number> => {
+      return new Promise((resolve, reject) => {
+        const p = spawn(
+          "node",
+          [
+            "-e",
+            "process.on('SIGTERM',()=>process.exit(0));process.stdout.write('ready\\n');setInterval(()=>{},1<<30)",
+          ],
+          { stdio: ["ignore", "pipe", "ignore"] }
+        );
+        let settled = false;
+        const finish = (err?: Error) => {
+          if (settled) return;
+          settled = true;
+          if (err) reject(err);
+          else if (p.pid) resolve(p.pid);
+          else reject(new Error("dummy daemon has no pid"));
+        };
+        p.stdout?.on("data", (buf: Buffer) => {
+          if (buf.toString().includes("ready")) finish();
+        });
+        p.on("error", (err) => finish(err));
+        setTimeout(() => finish(), 2_000);
+      });
+    };
+
+    const dummy1 = await spawnDummy();
+    pidsToKill.push(dummy1);
+    const dummy2 = await spawnDummy();
+    pidsToKill.push(dummy2);
+
+    const regDir = await mkdtemp(join(tmpdir(), "hermes-stopall-pl1-reg-"));
+    dirsToClean.push(regDir);
+    const registryPath = join(regDir, "daemons.json");
+
+    // Workspaces for each dummy — stopAll tries to unlink pid files
+    // under entry.cwd/.claude/hermes/daemon.pid.
+    const cwd1 = await mkdtemp(join(tmpdir(), "hermes-stopall-pl1-cwd1-"));
+    dirsToClean.push(cwd1);
+    await mkdir(join(cwd1, ".claude", "hermes"), { recursive: true });
+    await writeFile(join(cwd1, ".claude", "hermes", "daemon.pid"), `${dummy1}\n`);
+
+    const cwd2 = await mkdtemp(join(tmpdir(), "hermes-stopall-pl1-cwd2-"));
+    dirsToClean.push(cwd2);
+    await mkdir(join(cwd2, ".claude", "hermes"), { recursive: true });
+    await writeFile(join(cwd2, ".claude", "hermes", "daemon.pid"), `${dummy2}\n`);
+
+    await writeFile(
+      registryPath,
+      JSON.stringify({
+        daemons: [
+          { pid: dummy1, cwd: cwd1, startedAt: new Date().toISOString() },
+          { pid: dummy2, cwd: cwd2, startedAt: new Date().toISOString() },
+        ],
+      })
+    );
+
+    try {
+      const result = await new Promise<SpawnResult>((resolve, reject) => {
+        const child = spawn("bun", ["run", join(REPO_ROOT, "src/index.ts"), "--stop-all"], {
+          env: {
+            ...process.env,
+            HERMES_PARENT_PID: String(dummy1),
+            HERMES_DAEMON_REGISTRY: registryPath,
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        const stdout: Buffer[] = [];
+        const stderr: Buffer[] = [];
+        child.stdout.on("data", (d) => stdout.push(Buffer.from(d)));
+        child.stderr.on("data", (d) => stderr.push(Buffer.from(d)));
+        const timer = setTimeout(() => {
+          child.kill("SIGKILL");
+          reject(new Error("stop-all subprocess timed out after 20s"));
+        }, 20_000);
+        child.on("error", (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+        child.on("close", (code) => {
+          clearTimeout(timer);
+          resolve({
+            stdout: Buffer.concat(stdout).toString("utf8"),
+            stderr: Buffer.concat(stderr).toString("utf8"),
+            exitCode: code ?? 1,
+          });
+        });
+      });
+
+      expect(result.exitCode).toBe(0);
+
+      // Give the kernel a tick to register dummy-2's death.
+      await new Promise((r) => setTimeout(r, 200));
+
+      // dummy-1 (the parent daemon pid) must still be alive.
+      let dummy1Alive = true;
+      try {
+        process.kill(dummy1, 0);
+      } catch {
+        dummy1Alive = false;
+      }
+      expect(dummy1Alive).toBe(true);
+
+      // dummy-2 must be dead — stopAll should have SIGTERMed it.
+      // Wait up to 2s for it to actually exit.
+      const deadline = Date.now() + 2_000;
+      let dummy2Alive = true;
+      while (Date.now() < deadline) {
+        try {
+          process.kill(dummy2, 0);
+        } catch {
+          dummy2Alive = false;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(dummy2Alive).toBe(false);
+
+      // Registry file: dummy-1's row must still be present (we skipped
+      // it so we must not strip it); dummy-2's row must be removed.
+      const raw = await readFile(registryPath, "utf8").catch(() => "");
+      let parsed: { daemons?: Array<{ pid: number }> } = {};
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = {};
+      }
+      const pids = (parsed.daemons ?? []).map((d) => d.pid);
+      expect(pids).toContain(dummy1);
+      expect(pids).not.toContain(dummy2);
+
+      // dummy-1's pid-file must still exist — we skipped it.
+      const dummy1PidFileStillThere = await Bun.file(join(cwd1, ".claude", "hermes", "daemon.pid"))
+        .text()
+        .then(() => true)
+        .catch(() => false);
+      expect(dummy1PidFileStillThere).toBe(true);
+
+      // Log hint: the skip message should mention dummy-1's pid.
+      expect(result.stdout).toContain(String(dummy1));
+      expect(result.stdout.toLowerCase()).toMatch(/skip|parent/);
+    } finally {
+      for (const pid of pidsToKill) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+      for (const d of dirsToClean) {
+        await rm(d, { recursive: true, force: true }).catch(() => {});
+      }
+    }
+  }, 30_000);
+
+  // ---------------------------------------------------------------------
+  // PL-3: stopAll() unlinks pid-files and registry rows immediately
+  // after SIGTERM, before the daemon has actually exited, opening a
+  // race with a new `start`.
+  //
+  // Agreed fix: after process.kill(pid, "SIGTERM"), poll
+  // process.kill(pid, 0) with a short budget (~2000ms, sleeping 50ms)
+  // until it throws; only then unlink the pid-file / unregister.
+  //
+  // POSIX-only: Windows `process.kill(pid, "SIGTERM")` calls
+  // TerminateProcess under the hood, which is synchronous and
+  // uncatchable — no graceful-shutdown window, so the race we're
+  // guarding against does not exist on Windows.
+  // ---------------------------------------------------------------------
+  test.skipIf(process.platform === "win32")(
+    "PL-3: stopAll() waits for the daemon to actually exit before unlinking pid-file",
+    async () => {
+      const pidsToKill: number[] = [];
+      const dirsToClean: string[] = [];
+
+      // Dummy daemon that intentionally takes ~500ms to exit after
+      // SIGTERM. If stopAll unlinks the pid-file synchronously after
+      // SIGTERM (the bug), the pid-file will be gone long before the
+      // process is actually dead.
+      const spawnSlowDummy = (): Promise<number> => {
+        return new Promise((resolve, reject) => {
+          const p = spawn(
+            "node",
+            [
+              "-e",
+              "process.on('SIGTERM',()=>setTimeout(()=>process.exit(0),3000));process.stdout.write('ready\\n');setInterval(()=>{},1<<30)",
+            ],
+            { stdio: ["ignore", "pipe", "ignore"] }
+          );
+          let settled = false;
+          const finish = (err?: Error) => {
+            if (settled) return;
+            settled = true;
+            if (err) reject(err);
+            else if (p.pid) resolve(p.pid);
+            else reject(new Error("slow dummy has no pid"));
+          };
+          p.stdout?.on("data", (buf: Buffer) => {
+            if (buf.toString().includes("ready")) finish();
+          });
+          p.on("error", (err) => finish(err));
+          setTimeout(() => finish(), 2_000);
+        });
+      };
+
+      const slowPid = await spawnSlowDummy();
+      pidsToKill.push(slowPid);
+
+      const regDir = await mkdtemp(join(tmpdir(), "hermes-stopall-pl3-reg-"));
+      dirsToClean.push(regDir);
+      const registryPath = join(regDir, "daemons.json");
+
+      const cwd = await mkdtemp(join(tmpdir(), "hermes-stopall-pl3-cwd-"));
+      dirsToClean.push(cwd);
+      await mkdir(join(cwd, ".claude", "hermes"), { recursive: true });
+      const pidFilePath = join(cwd, ".claude", "hermes", "daemon.pid");
+      await writeFile(pidFilePath, `${slowPid}\n`);
+
+      await writeFile(
+        registryPath,
+        JSON.stringify({
+          daemons: [{ pid: slowPid, cwd, startedAt: new Date().toISOString() }],
+        })
+      );
+
+      try {
+        const result = await new Promise<SpawnResult>((resolve, reject) => {
+          const child = spawn("bun", ["run", join(REPO_ROOT, "src/index.ts"), "--stop-all"], {
+            env: {
+              ...process.env,
+              // No HERMES_PARENT_PID: slowPid must not be skipped.
+              HERMES_DAEMON_REGISTRY: registryPath,
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          const stdout: Buffer[] = [];
+          const stderr: Buffer[] = [];
+          child.stdout.on("data", (d) => stdout.push(Buffer.from(d)));
+          child.stderr.on("data", (d) => stderr.push(Buffer.from(d)));
+          const timer = setTimeout(() => {
+            child.kill("SIGKILL");
+            reject(new Error("stop-all subprocess timed out after 20s"));
+          }, 20_000);
+          child.on("error", (err) => {
+            clearTimeout(timer);
+            reject(err);
+          });
+          child.on("close", (code) => {
+            clearTimeout(timer);
+            resolve({
+              stdout: Buffer.concat(stdout).toString("utf8"),
+              stderr: Buffer.concat(stderr).toString("utf8"),
+              exitCode: code ?? 1,
+            });
+          });
+        });
+
+        expect(result.exitCode).toBe(0);
+
+        // The moment `--stop-all` returns, the slow daemon MUST already
+        // be gone. If stopAll raced and unlinked the pid-file while the
+        // daemon was still shutting down, `process.kill(pid, 0)` would
+        // still succeed here.
+        let stillAlive = true;
+        try {
+          process.kill(slowPid, 0);
+          stillAlive = true;
+        } catch {
+          stillAlive = false;
+        }
+        expect(stillAlive).toBe(false);
+
+        // And the pid-file should be gone only after the daemon exited —
+        // since the daemon is confirmed dead above, the pid-file must
+        // also be gone now.
+        const pidFileStillThere = await Bun.file(pidFilePath)
+          .text()
+          .then(() => true)
+          .catch(() => false);
+        expect(pidFileStillThere).toBe(false);
+      } finally {
+        for (const pid of pidsToKill) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {}
+        }
+        for (const d of dirsToClean) {
+          await rm(d, { recursive: true, force: true }).catch(() => {});
+        }
+      }
+    },
+    30_000
+  );
 });

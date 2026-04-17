@@ -496,6 +496,11 @@ export function cleanChildEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     if (k.startsWith("CLAUDE_CODE_")) continue;
     out[k] = v;
   }
+  // Mark this child so `--stop-all` / `--stop` run from inside it can skip
+  // our pid. Same class as the /clear bug; see commit 2c9097a. The current
+  // process is authoritative — if we're the daemon, our pid is the parent
+  // pid the child must protect.
+  out.HERMES_PARENT_PID = String(process.pid);
   return out;
 }
 
