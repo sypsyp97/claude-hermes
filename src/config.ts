@@ -54,7 +54,7 @@ const DEFAULT_SETTINGS: Settings = {
     forwardToDiscord: false,
   },
   telegram: { token: "", allowedUserIds: [] },
-  discord: { token: "", allowedUserIds: [], listenChannels: [] },
+  discord: { token: "", allowedUserIds: [], listenChannels: [], statusChannelId: "" },
   security: { level: "moderate", allowedTools: [], disallowedTools: [], bypassPermissions: false },
   stt: { baseUrl: "", model: "" },
   plugins: { preflightOnStart: false },
@@ -85,6 +85,7 @@ export interface DiscordConfig {
   token: string;
   allowedUserIds: string[]; // Discord snowflake IDs exceed Number.MAX_SAFE_INTEGER
   listenChannels: string[]; // Channel IDs where bot responds to all messages (no mention needed)
+  statusChannelId?: string; // Channel ID where live job/heartbeat status messages are posted
 }
 
 export type SecurityLevel =
@@ -289,6 +290,9 @@ function parseSettings(raw: Record<string, any>, discordUserIdsRaw: string[] = [
       listenChannels: Array.isArray(raw.discord?.listenChannels)
         ? raw.discord.listenChannels.map(String)
         : [],
+      statusChannelId: typeof raw.discord?.statusChannelId === "string"
+        ? raw.discord.statusChannelId.trim()
+        : "",
     },
     security: {
       level,

@@ -23,6 +23,7 @@ import {
   runUserMessage,
 } from "../runner";
 import { type StateData, writeState } from "../statusline";
+import { createJobStatusSink } from "../status/job-sink";
 import { getDayAndMinuteAtOffset } from "../timezone";
 
 const PREFLIGHT_SCRIPT = fileURLToPath(new URL("../preflight.ts", import.meta.url));
@@ -515,7 +516,8 @@ export async function start(args: string[] = []) {
             .filter((part) => part.length > 0)
             .join("\n\n");
           if (!mergedPrompt) return null;
-          return run("heartbeat", mergedPrompt);
+          const sink = createJobStatusSink("heartbeat", currentSettings);
+          return run("heartbeat", mergedPrompt, undefined, sink);
         })
         .then((r) => {
           if (!r) return;
@@ -678,7 +680,7 @@ export async function start(args: string[] = []) {
         if (hits.length === 0) continue;
         void executeScheduledJob(job, {
           resolvePrompt,
-          run,
+          run: (name, prompt, sink) => run(name, prompt, undefined, sink),
           clearJobSchedule: async (name) => {
             await clearJobSchedule(name);
             console.log(`[${ts()}] Cleared schedule for one-time job: ${name}`);
@@ -690,6 +692,7 @@ export async function start(args: string[] = []) {
           onError: (err) => {
             console.error(`[${ts()}] Job ${job.name} failed:`, err);
           },
+          makeSink: (name) => createJobStatusSink(name, currentSettings),
         });
       } catch (err) {
         console.error(`[${ts()}] Cron tick error for ${job.name}:`, err);

@@ -131,7 +131,7 @@ function debugLog(message: string): void {
 
 // --- Message sending ---
 
-function discordStatusTransport(token: string): DiscordTransport {
+export function discordStatusTransport(token: string): DiscordTransport {
   return {
     async postMessage(channelId, content) {
       const trimmed = content.slice(0, 2000);

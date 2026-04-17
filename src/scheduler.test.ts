@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Job } from "./jobs";
 import { executeScheduledJob } from "./scheduler";
+import type { StatusSink } from "./status/sink";
 
 function job(overrides: Partial<Job> = {}): Job {
   return {
@@ -165,5 +166,79 @@ describe("executeScheduledJob — forwarding (notify)", () => {
       onError: () => {},
     });
     expect(forwarded).toEqual([]);
+  });
+});
+
+describe("executeScheduledJob — makeSink hook", () => {
+  function fakeSink(): StatusSink {
+    return {
+      open: async () => {},
+      update: async () => {},
+      close: async () => {},
+    };
+  }
+
+  test("passes sink returned by makeSink as run()'s 3rd argument", async () => {
+    const sink = fakeSink();
+    const makeSinkCalls: string[] = [];
+    const runCalls: Array<{ name: string; prompt: string; sink: StatusSink | undefined }> = [];
+    await executeScheduledJob(job({ name: "heartbeat", recurring: true }), {
+      resolvePrompt: async (p) => p,
+      run: async (name, prompt, s) => {
+        runCalls.push({ name, prompt, sink: s });
+        return okResult(0);
+      },
+      clearJobSchedule: async () => {},
+      makeSink: (n) => {
+        makeSinkCalls.push(n);
+        return sink;
+      },
+    });
+    expect(makeSinkCalls).toEqual(["heartbeat"]);
+    expect(runCalls.length).toBe(1);
+    expect(runCalls[0]!.sink).toBe(sink);
+  });
+
+  test("passes undefined when makeSink returns undefined", async () => {
+    const runCalls: Array<{ sink: StatusSink | undefined }> = [];
+    await executeScheduledJob(job({ name: "heartbeat", recurring: true }), {
+      resolvePrompt: async (p) => p,
+      run: async (_name, _prompt, s) => {
+        runCalls.push({ sink: s });
+        return okResult(0);
+      },
+      clearJobSchedule: async () => {},
+      makeSink: () => undefined,
+    });
+    expect(runCalls.length).toBe(1);
+    expect(runCalls[0]!.sink).toBeUndefined();
+  });
+
+  test("no makeSink at all: run still called, sink arg is undefined, job completes", async () => {
+    const runCalls: Array<{ sink: StatusSink | undefined }> = [];
+    await executeScheduledJob(job({ name: "plain", recurring: false }), {
+      resolvePrompt: async (p) => p,
+      run: async (_name, _prompt, s) => {
+        runCalls.push({ sink: s });
+        return okResult(0);
+      },
+      clearJobSchedule: async () => {},
+    });
+    expect(runCalls.length).toBe(1);
+    expect(runCalls[0]!.sink).toBeUndefined();
+  });
+
+  test("makeSink is invoked with the job's name, not some other label", async () => {
+    const received: string[] = [];
+    await executeScheduledJob(job({ name: "my-cool-job", recurring: true }), {
+      resolvePrompt: async (p) => p,
+      run: async () => okResult(0),
+      clearJobSchedule: async () => {},
+      makeSink: (n) => {
+        received.push(n);
+        return undefined;
+      },
+    });
+    expect(received).toEqual(["my-cool-job"]);
   });
 });

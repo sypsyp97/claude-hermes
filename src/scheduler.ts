@@ -24,20 +24,23 @@
 
 import type { Job } from "./jobs";
 import type { RunResult } from "./runner";
+import type { StatusSink } from "./status/sink";
 
 export interface JobTickDeps {
   resolvePrompt(prompt: string): Promise<string>;
-  run(name: string, prompt: string): Promise<RunResult>;
+  run(name: string, prompt: string, sink?: StatusSink): Promise<RunResult>;
   clearJobSchedule(name: string): Promise<void>;
   onForward?(label: string, result: RunResult): void;
   onError?(err: unknown): void;
+  makeSink?(name: string): StatusSink | undefined;
 }
 
 export async function executeScheduledJob(job: Job, deps: JobTickDeps): Promise<void> {
   let result: RunResult;
   try {
     const prompt = await deps.resolvePrompt(job.prompt);
-    result = await deps.run(job.name, prompt);
+    const sink = deps.makeSink?.(job.name);
+    result = await deps.run(job.name, prompt, sink);
   } catch (err) {
     deps.onError?.(err);
     return;
