@@ -99,7 +99,23 @@ export async function removeThreadSession(source: ThreadSource, threadId: string
   await forgetLegacyThread(threadId);
 }
 
-async function forgetLegacyThread(threadId: string): Promise<void> {
+// Serialize all read-modify-write rewrites of the legacy `sessions.json`
+// behind a single in-flight promise. Two concurrent removeThreadSession
+// callers (Discord routinely fires THREAD_DELETE + THREAD_UPDATE archived
+// back-to-back) would otherwise each load the same on-disk snapshot, drop
+// their own key, and have the second writer clobber the first writer's
+// delete — silently resurrecting one of the "deleted" threads on next boot.
+let legacyRewriteChain: Promise<void> = Promise.resolve();
+
+function forgetLegacyThread(threadId: string): Promise<void> {
+  const next = legacyRewriteChain.then(() => rewriteLegacyOnce(threadId));
+  // Don't let one rewrite's rejection poison the chain — the inner function
+  // already swallows fs errors, but be defensive.
+  legacyRewriteChain = next.catch(() => undefined);
+  return next;
+}
+
+async function rewriteLegacyOnce(threadId: string): Promise<void> {
   const path = threadSessionsFile();
   let raw: string;
   try {

@@ -139,6 +139,15 @@ async function main() {
   const stdinBody = await readStdin();
   const prompt = args.prompt || stdinBody;
 
+  // Test hook: simulate a wedged child that ignores SIGTERM. The escalation
+  // path in executor / claude-stream must follow up with SIGKILL — this
+  // fixture proves it. No-op on Windows (TerminateProcess is unconditional).
+  if (process.env.HERMES_FAKE_IGNORE_SIGTERM === "1" && process.platform !== "win32") {
+    process.on("SIGTERM", () => {
+      // Swallow. The parent's SIGKILL fallback should still terminate us.
+    });
+  }
+
   if (scenario.delayMs && scenario.delayMs > 0) {
     await new Promise((r) => setTimeout(r, scenario.delayMs));
   }

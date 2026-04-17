@@ -19,11 +19,21 @@ export interface ExecuteOptions {
   systemPrompt?: string;
   cwd: string;
   timeoutMs?: number;
+  /**
+   * Grace period between SIGTERM and SIGKILL when the timeout fires. If the
+   * subagent installs a SIGTERM handler (or is wedged in a syscall), SIGTERM
+   * alone leaves `proc.on("close")` pending forever and the executor hangs.
+   * The SIGKILL fallback escalates after this delay so the evolve loop
+   * always makes progress. Default 5000ms; matches runner.ts.
+   */
+  killEscalationMs?: number;
   claudeBin?: string;
   sink?: StatusSink;
   taskId?: string;
   taskLabel?: string;
 }
+
+const DEFAULT_KILL_ESCALATION_MS = 5000;
 
 export interface ExecuteResult {
   ok: boolean;
@@ -43,12 +53,23 @@ export async function executeSelfEdit(opts: ExecuteOptions): Promise<ExecuteResu
     args.push("--append-system-prompt", opts.systemPrompt);
   }
 
+  const killEscalationMs = opts.killEscalationMs ?? DEFAULT_KILL_ESCALATION_MS;
+
   const started = Date.now();
   return new Promise((resolve) => {
     const proc = spawn(bin, args, { cwd: opts.cwd, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    const timer = setTimeout(() => proc.kill("SIGTERM"), timeoutMs);
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
+    const timer = setTimeout(() => {
+      try { proc.kill("SIGTERM"); } catch {}
+      // If the child ignores SIGTERM (handler installed, or wedged in a
+      // syscall), follow up with SIGKILL so `proc.on("close")` always fires.
+      // unref() so this timer alone doesn't keep the event loop alive after
+      // the function has otherwise resolved.
+      killTimer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, killEscalationMs);
+      if (typeof killTimer.unref === "function") killTimer.unref();
+    }, timeoutMs);
 
     proc.stdout?.on("data", (chunk) => {
       stdout += chunk.toString();
@@ -58,6 +79,7 @@ export async function executeSelfEdit(opts: ExecuteOptions): Promise<ExecuteResu
     });
     proc.on("close", (code) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       resolve({
         ok: code === 0,
         exitCode: code ?? -1,
@@ -68,6 +90,7 @@ export async function executeSelfEdit(opts: ExecuteOptions): Promise<ExecuteResu
     });
     proc.on("error", (err) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       resolve({
         ok: false,
         exitCode: -1,

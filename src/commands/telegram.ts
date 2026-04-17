@@ -9,6 +9,7 @@ import { resolveSkillPrompt, listSkills } from "../skills";
 import { mkdir } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { telegramInboxDir } from "../paths";
+import { projectSlugFromCwd } from "../runtime/claude-paths";
 import { createTelegramStatusSink, type TelegramTransport } from "../status/sinks/telegram";
 
 // --- Markdown → Telegram HTML conversion (ported from nanobot) ---
@@ -705,7 +706,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       return;
     }
     const home = homedir();
-    const projectSlug = process.cwd().replace(/\//g, "-");
+    const projectSlug = projectSlugFromCwd();
     const jsonlPath = `${home}/.claude/projects/${projectSlug}/${session.sessionId}.jsonl`;
     if (!existsSync(jsonlPath)) {
       await sendMessage(config.token, chatId, "Conversation file not found.", threadId);

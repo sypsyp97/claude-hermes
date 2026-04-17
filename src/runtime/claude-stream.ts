@@ -24,6 +24,12 @@ export interface StreamingOptions {
   taskId: string;
   label: string;
   timeoutMs?: number;
+  /**
+   * Grace period between SIGTERM and SIGKILL on timeout. Without it, a child
+   * that ignores SIGTERM keeps `proc.on("close")` pending forever and the
+   * streaming caller hangs indefinitely. Default 5000ms; matches runner.ts.
+   */
+  killEscalationMs?: number;
   claudeBin?: string;
 }
 
@@ -38,9 +44,11 @@ export interface StreamingResult {
 }
 
 const DEFAULT_TIMEOUT_MS = 15 * 60_000;
+const DEFAULT_KILL_ESCALATION_MS = 5000;
 
 export async function runClaudeStreaming(opts: StreamingOptions): Promise<StreamingResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const killEscalationMs = opts.killEscalationMs ?? DEFAULT_KILL_ESCALATION_MS;
   const [bin, ...prefix] = claudeArgv({ override: opts.claudeBin, env: opts.env });
   const args = [...prefix, ...opts.args, "--output-format", "stream-json", "--verbose"];
 
@@ -61,7 +69,18 @@ export async function runClaudeStreaming(opts: StreamingOptions): Promise<Stream
     let finalResult: string | undefined;
     let errorShort: string | undefined;
 
-    const timer = setTimeout(() => proc.kill("SIGTERM"), timeoutMs);
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
+    const timer = setTimeout(() => {
+      try {
+        proc.kill("SIGTERM");
+      } catch {}
+      killTimer = setTimeout(() => {
+        try {
+          proc.kill("SIGKILL");
+        } catch {}
+      }, killEscalationMs);
+      if (typeof killTimer.unref === "function") killTimer.unref();
+    }, timeoutMs);
 
     async function handleEvents(events: StatusEvent[]): Promise<void> {
       for (const event of events) {
@@ -92,6 +111,7 @@ export async function runClaudeStreaming(opts: StreamingOptions): Promise<Stream
 
     async function finalize(exitCode: number, ok: boolean): Promise<void> {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       await handleEvents(parser.flush());
       const closeErrorShort = ok
         ? undefined

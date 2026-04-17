@@ -10,11 +10,12 @@ import { resolveSkillPrompt } from "../skills";
 import { mkdir } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { discordInboxDir } from "../paths";
+import { projectSlugFromCwd } from "../runtime/claude-paths";
 import { createDiscordStatusSink, type DiscordTransport } from "../status/sinks/discord";
+import { DISCORD_API, discordApi } from "./discord-api";
 
 // --- Discord API constants ---
 
-const DISCORD_API = "https://discord.com/api/v10";
 const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
 
 const GatewayOp = {
@@ -126,42 +127,6 @@ const knownThreads = new Map<string, { parentId: string }>();
 function debugLog(message: string): void {
   if (!discordDebug) return;
   console.log(`[Discord][debug] ${message}`);
-}
-
-// --- REST API helper ---
-
-async function discordApi<T>(
-  token: string,
-  method: string,
-  endpoint: string,
-  body?: unknown,
-): Promise<T> {
-  const res = await fetch(`${DISCORD_API}${endpoint}`, {
-    method,
-    headers: {
-      Authorization: `Bot ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-
-  // Rate limit handling
-  if (res.status === 429) {
-    const data = (await res.json()) as { retry_after: number };
-    const retryMs = Math.ceil(data.retry_after * 1000);
-    debugLog(`Rate limited on ${method} ${endpoint}, retrying in ${retryMs}ms`);
-    await Bun.sleep(retryMs);
-    return discordApi(token, method, endpoint, body);
-  }
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Discord API ${method} ${endpoint}: ${res.status} ${res.statusText} ${text}`);
-  }
-
-  // 204 No Content (reactions, etc.)
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
 }
 
 // --- Message sending ---
@@ -789,7 +754,7 @@ async function handleInteractionCreate(token: string, interaction: DiscordIntera
         return;
       }
       const home = homedir();
-      const projectSlug = process.cwd().replace(/\//g, "-");
+      const projectSlug = projectSlugFromCwd();
       const jsonlPath = `${home}/.claude/projects/${projectSlug}/${session.sessionId}.jsonl`;
       if (!existsSync(jsonlPath)) {
         await respondToInteraction(interaction, { content: "Conversation file not found." });
@@ -931,6 +896,13 @@ function sendHeartbeat(): void {
 
 function startHeartbeat(): void {
   stopHeartbeat();
+  // Reset the ack flag for the new connection. Without this, a heartbeat-
+  // timeout-triggered close leaves `heartbeatAcked = false` from the dead
+  // session, so the very first interval tick on the new socket sees a
+  // missing ack and immediately self-closes — flap loop. `resetGatewayState`
+  // does this too but only fires from `stopGateway`, not the auto-reconnect
+  // path that goes through `ws.onclose → connectGateway → HELLO`.
+  heartbeatAcked = true;
   // First heartbeat with jitter per Discord spec
   heartbeatJitterTimer = setTimeout(() => {
     heartbeatJitterTimer = null;

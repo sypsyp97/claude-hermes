@@ -155,6 +155,47 @@ describe("executeSelfEdit — timeout", () => {
   }, 20_000);
 });
 
+describe("executeSelfEdit — SIGKILL escalation on stuck child", () => {
+  // Regression: the original timeout path only sent SIGTERM. If the child
+  // installed a SIGTERM handler that ignored the signal (or was wedged in
+  // an uninterruptible kernel call), `proc.on("close")` never fired and the
+  // promise hung forever — silently deadlocking the whole evolve loop.
+  // The fix follows the runner.ts pattern: schedule a SIGKILL after a short
+  // grace period so the process is reliably reaped.
+  test("SIGKILL fallback reaps a child that ignores SIGTERM", async () => {
+    if (process.platform === "win32") {
+      // On Windows `proc.kill("SIGTERM")` maps to TerminateProcess and is
+      // unconditional, so the bug doesn't apply. The fix is still safe (the
+      // SIGKILL fallback is a no-op on an already-dead handle).
+      return;
+    }
+    process.env.HERMES_FAKE_IGNORE_SIGTERM = "1";
+    process.env.HERMES_FAKE_DELAY_MS = "10000";
+    process.env.HERMES_FAKE_REPLY = "should never see this";
+    try {
+      const started = Date.now();
+      const result = await executeSelfEdit({
+        prompt: "stuck",
+        cwd: tempRoot,
+        claudeBin: FAKE_CLAUDE,
+        timeoutMs: 100,
+        killEscalationMs: 250,
+      });
+      const elapsed = Date.now() - started;
+      expect(result.ok).toBe(false);
+      expect(result.stdout).not.toContain("should never see this");
+      // SIGTERM at ~100ms, SIGKILL at ~350ms, plus reap latency. Generous
+      // upper bound to absorb CI jitter; the real signal is "doesn't hang
+      // for 10 full seconds because the child slept past its deadline".
+      expect(elapsed).toBeLessThan(5000);
+    } finally {
+      delete process.env.HERMES_FAKE_IGNORE_SIGTERM;
+      delete process.env.HERMES_FAKE_DELAY_MS;
+      delete process.env.HERMES_FAKE_REPLY;
+    }
+  }, 15_000);
+});
+
 describe("executeSelfEdit — bin resolution", () => {
   test("opts.claudeBin overrides HERMES_CLAUDE_BIN env var", async () => {
     // Point env at something broken; opts.claudeBin should win.

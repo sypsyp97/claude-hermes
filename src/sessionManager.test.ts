@@ -127,6 +127,42 @@ describe("removeThreadSession", () => {
     await resetSharedDbCache();
     expect(await mgr.peekThreadSession("discord", "ghost-thread")).toBeNull();
   });
+
+  // Regression: two concurrent removeThreadSession() calls each do a
+  // read-modify-write on the legacy JSON. Without serialization, both readers
+  // load the same {a, b} snapshot, each delete their own key, and the second
+  // writer clobbers the first writer's delete — so one of the "deleted"
+  // threads silently comes back on next boot.
+  test("concurrent removeThreadSession for two threads: neither resurrects on cache reset", async () => {
+    const { writeFile } = await import("node:fs/promises");
+    const { threadSessionsFile } = await import("./paths");
+    await writeFile(
+      threadSessionsFile(),
+      JSON.stringify({
+        threads: {
+          "ghost-a": { sessionId: "sess-a" },
+          "ghost-b": { sessionId: "sess-b" },
+        },
+      }),
+      "utf8"
+    );
+
+    await resetSharedDbCache();
+    expect((await mgr.peekThreadSession("discord", "ghost-a"))?.sessionId).toBe("sess-a");
+    expect((await mgr.peekThreadSession("discord", "ghost-b"))?.sessionId).toBe("sess-b");
+
+    // Fire concurrent removes — exactly the THREAD_DELETE+THREAD_UPDATE
+    // pattern Discord generates when a thread is archived and then deleted.
+    await Promise.all([
+      mgr.removeThreadSession("discord", "ghost-a"),
+      mgr.removeThreadSession("discord", "ghost-b"),
+    ]);
+
+    // After a daemon restart, neither must come back.
+    await resetSharedDbCache();
+    expect(await mgr.peekThreadSession("discord", "ghost-a")).toBeNull();
+    expect(await mgr.peekThreadSession("discord", "ghost-b")).toBeNull();
+  });
 });
 
 describe("incrementThreadTurn", () => {
