@@ -10,6 +10,7 @@ import { mkdir } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { telegramInboxDir } from "../paths";
 import { projectSlugFromCwd } from "../runtime/claude-paths";
+import { extractSessionAndResultFromText } from "../runtime/claude-output";
 import { createTelegramStatusSink, type TelegramTransport } from "../status/sinks/telegram";
 
 // --- Markdown → Telegram HTML conversion (ported from nanobot) ---
@@ -873,7 +874,8 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     if (result.exitCode !== 0) {
       await sendMessage(config.token, chatId, `Error (exit ${result.exitCode}): ${result.stderr || "Unknown error"}`, threadId);
     } else {
-      const { cleanedText: afterReact, reactionEmoji } = extractReactionDirective(result.stdout || "");
+      const visibleText = extractSessionAndResultFromText(result.stdout || "").result ?? result.stdout ?? "";
+      const { cleanedText: afterReact, reactionEmoji } = extractReactionDirective(visibleText);
       const { cleanedText, filePaths } = extractSendFileDirectives(afterReact);
       if (reactionEmoji) {
         await sendReaction(config.token, chatId, message.message_id, reactionEmoji).catch((err) => {

@@ -494,6 +494,50 @@ describe("runner.run with a StatusSink", () => {
     }
   });
 
+  test("streaming fallback extracts the final reply from a JSON-array line instead of leaking envelopes", async () => {
+    const { createFakeSink } = await import("./status/sink");
+    const { writeFile } = await import("node:fs/promises");
+    const scenarioPath = join(tmpProj, `sink-array-${Date.now()}.json`);
+    await writeFile(
+      scenarioPath,
+      JSON.stringify({
+        streamEvents: [
+          [
+            { type: "system", subtype: "init", session_id: "sess-sink-array", model: "fake" },
+            {
+              type: "assistant",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "intermediate text" }],
+              },
+            },
+            {
+              type: "result",
+              subtype: "success",
+              result: "final array reply",
+              session_id: "sess-sink-array",
+              num_turns: 1,
+            },
+          ],
+        ],
+      }),
+      "utf8"
+    );
+    const prevScenario = process.env.HERMES_FAKE_SCENARIO_PATH;
+    process.env.HERMES_FAKE_SCENARIO_PATH = scenarioPath;
+    try {
+      const sink = createFakeSink();
+      const result = await runner.run("sink-array", "hi", "thread-sink-array", sink);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe("final array reply");
+      expect(result.stdout).not.toContain('"type":"result"');
+      expect(result.stdout).not.toContain('"type":"assistant"');
+    } finally {
+      if (prevScenario === undefined) delete process.env.HERMES_FAKE_SCENARIO_PATH;
+      else process.env.HERMES_FAKE_SCENARIO_PATH = prevScenario;
+    }
+  });
+
   test("without a sink, behavior is unchanged — buffered JSON path still used", async () => {
     process.env.HERMES_FAKE_REPLY = "buffered reply";
     process.env.HERMES_FAKE_SESSION_ID = "sess-buffered-check";

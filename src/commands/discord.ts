@@ -12,6 +12,7 @@ import { mkdir } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { discordInboxDir } from "../paths";
 import { projectSlugFromCwd } from "../runtime/claude-paths";
+import { extractSessionAndResultFromText } from "../runtime/claude-output";
 import { createDiscordStatusSink, type DiscordTransport } from "../status/sinks/discord";
 import { DISCORD_API, discordApi } from "./discord-api";
 import { buildSlashCommandList } from "./slash-commands";
@@ -578,7 +579,8 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
     if (result.exitCode !== 0) {
       await sendMessage(config.token, channelId, `Error (exit ${result.exitCode}): ${result.stderr || result.stdout || "Unknown error"}`);
     } else {
-      const { cleanedText, reactionEmoji } = extractReactionDirective(result.stdout || "");
+      const visibleText = extractSessionAndResultFromText(result.stdout || "").result ?? result.stdout ?? "";
+      const { cleanedText, reactionEmoji } = extractReactionDirective(visibleText);
       if (reactionEmoji) {
         await sendReaction(config.token, channelId, message.id, reactionEmoji).catch((err) => {
           console.error(`[Discord] Failed to send reaction for ${label}: ${err instanceof Error ? err.message : err}`);

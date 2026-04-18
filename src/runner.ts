@@ -35,6 +35,10 @@ import { appendMessage } from "./state/repos/messages";
 import { captureCandidateSkill } from "./learning/completion-hook";
 import { createToolCollector } from "./learning/tool-collector";
 import type { TrajectoryToolCall } from "./learning/closed-loop";
+import {
+  extractSessionAndResult as extractSessionAndResultFromParsed,
+  extractSessionAndResultFromText,
+} from "./runtime/claude-output";
 
 // These are anchored to the hermes installation (via import.meta.dir), not the
 // project's cwd, so they are safe to freeze at module load.
@@ -431,30 +435,7 @@ async function runClaudeOnceStreaming(
 export function extractSessionAndResult(
   parsed: unknown,
 ): { sessionId?: string; result?: string } {
-  if (Array.isArray(parsed)) {
-    let sessionId: string | undefined;
-    let result: string | undefined;
-    for (const ev of parsed) {
-      if (!ev || typeof ev !== "object") continue;
-      const e = ev as Record<string, unknown>;
-      if (typeof e.session_id === "string" && !sessionId) {
-        sessionId = e.session_id;
-      }
-      if (e.type === "result") {
-        if (typeof e.session_id === "string") sessionId = e.session_id;
-        if (typeof e.result === "string") result = e.result;
-      }
-    }
-    return { sessionId, result };
-  }
-  if (parsed && typeof parsed === "object") {
-    const o = parsed as Record<string, unknown>;
-    return {
-      sessionId: typeof o.session_id === "string" ? o.session_id : undefined,
-      result: typeof o.result === "string" ? o.result : undefined,
-    };
-  }
-  return {};
+  return extractSessionAndResultFromParsed(parsed);
 }
 
 function dirScopePrompt(): string {
@@ -897,6 +878,7 @@ async function execClaude(
   const rawStdout = exec.rawStdout;
   const stderr = exec.stderr;
   const exitCode = exec.exitCode;
+  const extractedFromRaw = sink ? extractSessionAndResultFromText(rawStdout) : {};
   let stdout = rawStdout;
   let sessionId = existing?.sessionId ?? "unknown";
   const rateLimitMessage = extractRateLimitMessage(rawStdout, stderr);
@@ -908,15 +890,21 @@ async function execClaude(
   // For new sessions, extract session_id + result text. Streaming has these
   // already on `exec`; buffered mode requires a JSON.parse of the JSON envelope.
   if (!rateLimitMessage && isNew && exitCode === 0) {
-    if (sink && exec.sessionId) {
-      sessionId = exec.sessionId;
-      stdout = exec.finalResult ?? "";
-      if (threadId) {
-        await createThreadSession(source, threadId, sessionId);
-        console.log(`[${new Date().toLocaleTimeString()}] Thread session created: ${sessionId} (thread ${threadId.slice(0, 8)})`);
-      } else {
-        await createSession(sessionId);
-        console.log(`[${new Date().toLocaleTimeString()}] Session created: ${sessionId}`);
+    if (sink) {
+      const streamedSessionId = exec.sessionId ?? extractedFromRaw.sessionId;
+      const streamedResult = exec.finalResult ?? extractedFromRaw.result;
+      if (streamedSessionId) {
+        sessionId = streamedSessionId;
+        stdout = streamedResult ?? "";
+        if (threadId) {
+          await createThreadSession(source, threadId, sessionId);
+          console.log(`[${new Date().toLocaleTimeString()}] Thread session created: ${sessionId} (thread ${threadId.slice(0, 8)})`);
+        } else {
+          await createSession(sessionId);
+          console.log(`[${new Date().toLocaleTimeString()}] Session created: ${sessionId}`);
+        }
+      } else if (streamedResult !== undefined) {
+        stdout = streamedResult;
       }
     } else {
       try {
@@ -938,10 +926,11 @@ async function execClaude(
         console.error(`[${new Date().toLocaleTimeString()}] Failed to parse session from Claude output:`, e);
       }
     }
-  } else if (!rateLimitMessage && !isNew && exitCode === 0 && sink && exec.finalResult !== undefined) {
+  } else if (!rateLimitMessage && !isNew && exitCode === 0 && sink) {
     // Resumed sessions in streaming mode: stdout is the assistant's final text,
     // not the NDJSON.
-    stdout = exec.finalResult;
+    const streamedResult = exec.finalResult ?? extractedFromRaw.result;
+    if (streamedResult !== undefined) stdout = streamedResult;
   }
 
   const result: RunResult = {
