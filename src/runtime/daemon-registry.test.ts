@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { existsSync } from "node:fs";
 import * as fsPromises from "node:fs/promises";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { type DaemonEntry, listDaemons, registerDaemon, unregisterDaemon } from "./daemon-registry";
+import { dirname, join } from "node:path";
+import { type DaemonEntry, defaultRegistryPath, listDaemons, registerDaemon, unregisterDaemon } from "./daemon-registry";
+import * as registry from "./daemon-registry";
 
 let dir: string;
 let registryPath: string;
@@ -256,5 +258,155 @@ describe("daemon-registry — atomic write (crash-mid-write safety)", () => {
         default: { ...fsPromises, writeFile: realWriteFile },
       }));
     }
+  });
+});
+
+describe("daemon-registry — project-local registry path", () => {
+  // Phase X: the registry is no longer global. It lives at
+  // <cwd>/.claude/hermes/daemons.json so each project owns its own
+  // daemon list and Windows never needs to trust `homedir()`.
+  test("defaultRegistryPath(cwd) is rooted under the given cwd", () => {
+    const projRoot = join(dir, "projA");
+    expect(defaultRegistryPath(projRoot)).toBe(
+      join(projRoot, ".claude", "hermes", "daemons.json"),
+    );
+  });
+
+  test("defaultRegistryPath() with no arg falls back to process.cwd()", () => {
+    const orig = process.cwd();
+    try {
+      process.chdir(dir);
+      expect(defaultRegistryPath()).toBe(join(dir, ".claude", "hermes", "daemons.json"));
+    } finally {
+      process.chdir(orig);
+    }
+  });
+
+  test("daemon-registry.ts source no longer imports node:os (homedir is gone)", async () => {
+    // Read the production source as a string and assert homedir/node:os
+    // are not imported. The spec explicitly forbids the homedir import so
+    // the registry can't silently drift back to a global path on refactor.
+    const src = await readFile(join(import.meta.dir, "daemon-registry.ts"), "utf8");
+    expect(src.includes("node:os")).toBe(false);
+    expect(/\bhomedir\b/.test(src)).toBe(false);
+  });
+});
+
+describe("daemon-registry — migrateGlobalRegistry", () => {
+  // Contract: read <home>/.claude/hermes/daemons.json, move entries whose
+  // .cwd equals the current cwd into the project-local file, rewrite (or
+  // unlink) the global file, and report counts. Idempotent.
+  //
+  // All paths are mkdtemp-scoped so the real user home is never touched.
+  test("migrateGlobalRegistry is an exported function", () => {
+    expect(typeof registry.migrateGlobalRegistry).toBe("function");
+  });
+
+  test("no global file: returns { migrated: 0, remainingGlobal: 0 }", async () => {
+    const home = join(dir, "home");
+    const cwd = join(dir, "proj");
+    await mkdir(home, { recursive: true });
+    await mkdir(cwd, { recursive: true });
+
+    const result = await registry.migrateGlobalRegistry({ home, cwd });
+    expect(result).toEqual({ migrated: 0, remainingGlobal: 0 });
+    // No files should have been created.
+    expect(existsSync(join(home, ".claude", "hermes", "daemons.json"))).toBe(false);
+    expect(existsSync(join(cwd, ".claude", "hermes", "daemons.json"))).toBe(false);
+  });
+
+  test("all entries match cwd: moves them and unlinks the global file", async () => {
+    const home = join(dir, "home");
+    const cwd = join(dir, "proj");
+    const globalPath = join(home, ".claude", "hermes", "daemons.json");
+    const localPath = join(cwd, ".claude", "hermes", "daemons.json");
+
+    await mkdir(dirname(globalPath), { recursive: true });
+    await writeFile(
+      globalPath,
+      JSON.stringify({
+        daemons: [
+          { pid: 1001, cwd, startedAt: "2025-01-01T00:00:00Z" },
+          { pid: 1002, cwd, startedAt: "2025-01-01T01:00:00Z" },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = await registry.migrateGlobalRegistry({ home, cwd });
+    expect(result.migrated).toBe(2);
+    expect(result.remainingGlobal).toBe(0);
+
+    // Global file is gone.
+    expect(existsSync(globalPath)).toBe(false);
+    // Local file contains both entries.
+    const localRaw = await readFile(localPath, "utf8");
+    const localParsed = JSON.parse(localRaw) as { daemons: Array<{ pid: number }> };
+    expect(localParsed.daemons.map((d) => d.pid).sort()).toEqual([1001, 1002]);
+  });
+
+  test("mixed: matching entries move, non-matching stay in global", async () => {
+    const home = join(dir, "home");
+    const cwd = join(dir, "proj");
+    const otherCwd = join(dir, "other");
+    const globalPath = join(home, ".claude", "hermes", "daemons.json");
+    const localPath = join(cwd, ".claude", "hermes", "daemons.json");
+
+    await mkdir(dirname(globalPath), { recursive: true });
+    await writeFile(
+      globalPath,
+      JSON.stringify({
+        daemons: [
+          { pid: 1001, cwd, startedAt: "2025-01-01T00:00:00Z" },
+          { pid: 2002, cwd: otherCwd, startedAt: "2025-01-01T01:00:00Z" },
+          { pid: 1003, cwd, startedAt: "2025-01-01T02:00:00Z" },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = await registry.migrateGlobalRegistry({ home, cwd });
+    expect(result.migrated).toBe(2);
+    expect(result.remainingGlobal).toBe(1);
+
+    // Global file still exists and contains ONLY the non-matching entry.
+    const globalRaw = await readFile(globalPath, "utf8");
+    const globalParsed = JSON.parse(globalRaw) as { daemons: Array<{ pid: number; cwd: string }> };
+    expect(globalParsed.daemons.length).toBe(1);
+    expect(globalParsed.daemons[0].pid).toBe(2002);
+    expect(globalParsed.daemons[0].cwd).toBe(otherCwd);
+
+    // Local file has the two matching entries.
+    const localParsed = JSON.parse(await readFile(localPath, "utf8")) as {
+      daemons: Array<{ pid: number }>;
+    };
+    expect(localParsed.daemons.map((d) => d.pid).sort()).toEqual([1001, 1003]);
+  });
+
+  test("idempotent: running twice produces the same final state", async () => {
+    const home = join(dir, "home");
+    const cwd = join(dir, "proj");
+    const globalPath = join(home, ".claude", "hermes", "daemons.json");
+    const localPath = join(cwd, ".claude", "hermes", "daemons.json");
+
+    await mkdir(dirname(globalPath), { recursive: true });
+    await writeFile(
+      globalPath,
+      JSON.stringify({
+        daemons: [{ pid: 1001, cwd, startedAt: "2025-01-01T00:00:00Z" }],
+      }),
+      "utf8",
+    );
+
+    const first = await registry.migrateGlobalRegistry({ home, cwd });
+    expect(first.migrated).toBe(1);
+    const firstLocal = await readFile(localPath, "utf8");
+
+    const second = await registry.migrateGlobalRegistry({ home, cwd });
+    expect(second).toEqual({ migrated: 0, remainingGlobal: 0 });
+    // Local file unchanged after the second run.
+    expect(await readFile(localPath, "utf8")).toBe(firstLocal);
+    // Global file still absent.
+    expect(existsSync(globalPath)).toBe(false);
   });
 });

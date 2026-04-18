@@ -9,21 +9,34 @@ import {
   LEGACY_MANAGED_BLOCK_START,
   MANAGED_BLOCK_END,
   MANAGED_BLOCK_START,
+  channelMemoryFile,
+  crossSessionMemoryFile,
   discordInboxDir,
   hermesDir,
+  identityMemoryFile,
   inboxDir,
   jobsDir,
   legacyDir,
   logsDir,
+  memoryDir,
   migrationMarkerFile,
   pidFile,
   promptsDir,
   sessionFile,
   settingsFile,
+  soulMemoryFile,
   stateDbFile,
   telegramInboxDir,
   threadSessionsFile,
+  userMemoryFile,
 } from "./paths";
+// `legacyMemoryDir` is a NEW export added in Phase X. Import it via a
+// namespace import so the test file still compiles (the direct named
+// import above would fail at module-load time if the export is missing,
+// which would turn the whole `paths.test.ts` suite red, not just our new
+// tests). Using dynamic access lets the new test specifically fail while
+// the rest of the file stays readable.
+import * as paths from "./paths";
 
 describe("path constants", () => {
   test("new layout lives under .claude/hermes", () => {
@@ -54,6 +67,23 @@ describe("path constants", () => {
     expect(pidFile(root)).toBe(join(root, ".claude", "hermes", "daemon.pid"));
     expect(stateDbFile(root)).toBe(join(root, ".claude", "hermes", "state.db"));
     expect(migrationMarkerFile(root)).toBe(join(root, ".claude", "hermes", "MIGRATED.json"));
+  });
+
+  test("memory paths live under <cwd>/memory (project root, not .claude/hermes)", () => {
+    const root = "/tmp/m";
+    expect(memoryDir(root)).toBe(join(root, "memory"));
+    expect(userMemoryFile(root)).toBe(join(root, "memory", "USER.md"));
+    expect(crossSessionMemoryFile(root)).toBe(join(root, "memory", "MEMORY.md"));
+    expect(soulMemoryFile(root)).toBe(join(root, "memory", "SOUL.md"));
+    expect(identityMemoryFile(root)).toBe(join(root, "memory", "IDENTITY.md"));
+    expect(channelMemoryFile("abc", root)).toBe(join(root, "memory", "channels", "abc.md"));
+  });
+
+  test("legacyMemoryDir exposes the old .claude/hermes/memory path for the migrator", () => {
+    const root = "/tmp/m-legacy";
+    // The new export must exist and return the OLD memory location.
+    expect(typeof paths.legacyMemoryDir).toBe("function");
+    expect(paths.legacyMemoryDir(root)).toBe(join(root, ".claude", "hermes", "memory"));
   });
 
   test("managed block markers carry the new name and expose legacy markers for migration", () => {
