@@ -142,6 +142,62 @@ function preflightExitCode(status: StartupPrecondition["status"]): number {
   }
 }
 
+type CommandResult = {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+};
+
+type DiscordForwardSender = (targetId: string, text: string) => Promise<void>;
+
+interface ForwardDiscordResultOptions {
+  allowedUserIds: string[];
+  label: string;
+  result: CommandResult;
+  sendToChannel?: DiscordForwardSender | null;
+  sendToUser?: DiscordForwardSender | null;
+  statusChannelId?: string;
+  onError?: (message: string) => void;
+}
+
+function formatForwardedResult(label: string, result: CommandResult): string {
+  return result.exitCode === 0
+    ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
+    : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
+}
+
+export async function forwardDiscordResult({
+  allowedUserIds,
+  label,
+  result,
+  sendToChannel,
+  sendToUser,
+  statusChannelId,
+  onError,
+}: ForwardDiscordResultOptions): Promise<"channel" | "dm" | "skip"> {
+  const text = formatForwardedResult(label, result);
+  const trimmedChannelId = statusChannelId?.trim();
+  if (trimmedChannelId && sendToChannel) {
+    try {
+      await sendToChannel(trimmedChannelId, text);
+    } catch (err) {
+      onError?.(`[Discord] Failed to forward to channel ${trimmedChannelId}: ${err}`);
+    }
+    return "channel";
+  }
+  if (!sendToUser || allowedUserIds.length === 0) return "skip";
+  await Promise.all(
+    allowedUserIds.map(async (userId) => {
+      try {
+        await sendToUser(userId, text);
+      } catch (err) {
+        onError?.(`[Discord] Failed to forward to ${userId}: ${err}`);
+      }
+    }),
+  );
+  return "dm";
+}
+
 // --- Statusline setup/teardown ---
 
 const STATUSLINE_SCRIPT = `#!/usr/bin/env node
@@ -550,21 +606,24 @@ export async function start(args: string[] = []) {
   if (!telegramToken) console.log("  Telegram: not configured");
 
   // --- Discord ---
+  let discordSendToChannel: ((channelId: string, text: string) => Promise<void>) | null = null;
   let discordSendToUser: ((userId: string, text: string) => Promise<void>) | null = null;
   let discordToken = "";
 
   async function initDiscord(token: string) {
     if (token && token !== discordToken) {
-      const { startGateway, sendMessageToUser, stopGateway } = await import("./discord");
+      const { startGateway, sendMessage, sendMessageToUser, stopGateway } = await import("./discord");
       if (discordToken) stopGateway();
       startGateway(debugFlag);
       discordStopGateway = stopGateway;
+      discordSendToChannel = (channelId, text) => sendMessage(token, channelId, text);
       discordSendToUser = (userId, text) => sendMessageToUser(token, userId, text);
       discordToken = token;
       console.log(`[${ts()}] Discord: enabled`);
     } else if (!token && discordToken) {
       if (discordStopGateway) discordStopGateway();
       discordStopGateway = null;
+      discordSendToChannel = null;
       discordSendToUser = null;
       discordToken = "";
       console.log(`[${ts()}] Discord: disabled`);
@@ -611,18 +670,17 @@ export async function start(args: string[] = []) {
 
   function forwardToDiscord(
     label: string,
-    result: { exitCode: number; stdout: string; stderr: string },
+    result: CommandResult,
   ) {
-    if (!discordSendToUser || currentSettings.discord.allowedUserIds.length === 0) return;
-    const text =
-      result.exitCode === 0
-        ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
-        : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
-    for (const userId of currentSettings.discord.allowedUserIds) {
-      discordSendToUser(userId, text).catch((err) =>
-        console.error(`[Discord] Failed to forward to ${userId}: ${err}`),
-      );
-    }
+    void forwardDiscordResult({
+      allowedUserIds: currentSettings.discord.allowedUserIds,
+      label,
+      result,
+      sendToChannel: discordSendToChannel,
+      sendToUser: discordSendToUser,
+      statusChannelId: currentSettings.discord.statusChannelId,
+      onError: (message) => console.error(message),
+    });
   }
 
   // --- Heartbeat scheduling ---

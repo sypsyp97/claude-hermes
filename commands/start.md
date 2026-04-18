@@ -97,13 +97,15 @@ Follow these steps exactly:
      - Set `telegram.token` and `telegram.allowedUserIds` (as array of numbers) accordingly.
      - Note: Telegram bot runs in-process with the daemon. All components (heartbeat, cron, telegram, discord) share one Claude session.
 
-   - **If yes to Discord**: Do NOT use AskUserQuestion for Discord fields. Ask in normal free-form text for two values (both optional, user can skip either):
-     - Discord bot token (hint: create a bot at https://discord.com/developers/applications → Bot → Token. Enable **Message Content Intent** under Privileged Gateway Intents.)
-     - Allowed Discord user IDs (hint: enable Developer Mode in Discord settings → right-click your profile → Copy User ID). These are large numbers — they will be stored as strings.
-     - Set `discord.token` and `discord.allowedUserIds` (as array of strings) accordingly.
-     - Listen channel IDs (optional — hint: right-click a channel in Discord with Developer Mode enabled → Copy Channel ID). Channels where the bot responds to all messages without requiring an @mention.
-     - Set `discord.listenChannels` (as array of strings) accordingly.
-     - Note: Discord bot connects via WebSocket gateway in-process with the daemon. It supports DMs, guild mentions/replies, slash commands (/start, /reset), voice messages, and image attachments. `discord.allowedUserIds` is an allowlist that applies to messages, slash commands, and button interactions.
+    - **If yes to Discord**: Do NOT use AskUserQuestion for Discord fields. Ask in normal free-form text for these values (all optional, user can skip any):
+      - Discord bot token (hint: create a bot at https://discord.com/developers/applications → Bot → Token. Enable **Message Content Intent** under Privileged Gateway Intents.)
+      - Allowed Discord user IDs (hint: enable Developer Mode in Discord settings → right-click your profile → Copy User ID). These are large numbers — they will be stored as strings.
+      - Set `discord.token` and `discord.allowedUserIds` (as array of strings) accordingly.
+      - Listen channel IDs (optional — hint: right-click a channel in Discord with Developer Mode enabled → Copy Channel ID). Channels where the bot responds to all messages without requiring an @mention.
+      - Set `discord.listenChannels` (as array of strings) accordingly.
+      - Status channel ID (optional — hint: right-click a channel in Discord with Developer Mode enabled → Copy Channel ID). Heartbeat, trigger, and scheduled-job output will post there instead of DM fan-out when set.
+      - Set `discord.statusChannelId` (as a string) accordingly.
+      - Note: Discord bot connects via WebSocket gateway in-process with the daemon. It supports DMs, guild mentions/replies, slash commands (/start, /reset), voice messages, and image attachments. `discord.allowedUserIds` is an allowlist that applies to messages, slash commands, and button interactions.
 
    - **Security level mapping** — set `security.level` in settings based on their choice:
      - "Locked" → `"locked"`
@@ -202,7 +204,8 @@ To get `<DISCORD_BOT_ID>`: read the daemon log for the bot's user ID (shown in t
   "discord": {
     "token": "MTIz...",
     "allowedUserIds": ["123456789012345678"],
-    "listenChannels": ["987654321098765432"]
+    "listenChannels": ["987654321098765432"],
+    "statusChannelId": "555555555555555555"
   },
   "security": {
     "level": "moderate",
@@ -228,6 +231,7 @@ To get `<DISCORD_BOT_ID>`: read the daemon log for the bot's user ID (shown in t
 - `discord.token` — Discord bot token from the Developer Portal
 - `discord.allowedUserIds` — array of string Discord user IDs (snowflakes) allowed to interact
 - `discord.listenChannels` — array of string channel IDs where the bot responds to all messages without requiring an @mention
+- `discord.statusChannelId` — optional channel ID where heartbeat, trigger, and scheduled-job output is posted
 - `security.level` — one of: `locked`, `strict`, `moderate`, `unrestricted`
 - `security.allowedTools` — extra tools to allow on top of the level (e.g. `["Bash(git:*)"]`)
 - `security.disallowedTools` — tools to block on top of the level
