@@ -93,37 +93,17 @@ daemon 按频道名自动路由：
 - **父 daemon 保护：** 从 daemon 自己的 Claude 子进程里调 `/stop`、`/stop-all`、`/clear`，永远不会干掉正在跑自己的那个 daemon。
 - **Rate-limit 重试：** Discord 加 reaction 的 PUT 走统一的 `discordApi` helper，碰到 429 会按 `Retry-After` 重试，不会像之前那样默默丢弃。
 
-## 记忆系统
+## 记忆
 
-分三层，稳定性从高到低排：
+三层，从稳定到易变：
 
-**1. Identity（markdown，人可编辑，cache 友好的前缀）**
-- `prompts/{IDENTITY,USER,SOUL}.md` —— 仓库级模板，进 git。
-- 项目根 `CLAUDE.md` —— per-project 指令。
-- `.claude/hermes/memory/{SOUL,IDENTITY,USER}.md` —— 每个 workspace 的覆盖。
-
-这些组成每次 `--append-system-prompt` 的稳定头部，**要跨轮保持字节相同**，CLI 的 prompt cache 才会命中。sanitization 规则见 [`src/memory/compose.ts`](src/memory/compose.ts)：`MEMORY.md` 里的 ISO 时间戳标记被剥掉，超 byte cap 时从头部开始丢最老条目，前缀里不留任何易变内容。
-
-**2. Episodic state（SQLite，只追加，FTS 索引）**
-- `state.db` → `messages` 表，每轮成功调用由 `persistTurn` 写入。每行带 `importance`（1–10，启发式定：user=6、assistant=5、tool=3、system=4，每个 `remember` / `todo` / `?` 命中 +2，封顶 10）、`last_access`、`digested_at`。
-- FTS5 虚拟表：`messages_fts` 用于跨会话搜索，`skill_descriptions_fts` 用于 skill 检索。
-- Park 式打分（`α·recency + β·importance + γ·relevance`，`recency = exp(-h/24)`）在 `src/memory/scoring.ts`；`searchWithScoring` 返回按分排序的命中。
-
-**3. Primitives（现在都接进 runtime 了，但要么 opt-in、要么人工 gate）**
-- **Letta 式 blocks**（`src/memory/blocks.ts`）—— 标签 slot（`persona` / `human` / `project` / `channel:<id>`）带硬字符预算，超预算直接抛错，不会偷偷截断。`.claude/hermes/memory/blocks/` 下的所有 block，runner 在每一轮都加载，按字母顺序以 `<block:NAME>…</block>` 框架打进 system prompt — 每次 spawn 都看得见。
-- **Anthropic `memory_20250818` 六操作 API**（`src/memory/agent-memory.ts`）—— `view / create / strReplace / insert / del / rename`，全部限定在 `.claude/hermes/memory/agent/` 内。路径穿越由单一门禁 `resolveAgentPath` 挡下。Composer 在每一份 prompt 末尾追加一段 hint，告诉 agent 这个 scratchpad 存在以及哪些 op 可用；`dispatchAgentMemory`（在 `agent-memory-dispatch.ts`）把六个 op 压成一个 JSON 形状的统一入口，返回 `{ ok, result?, error? }`。
-- **Honcho 式 Dream cron**（`src/memory/dream.ts`、`src/memory/dream-scheduler.ts`）—— `runDream` 把超过 `ageDays` 的老消息压缩成 per-session 摘要、去重 `MEMORY.md` 里的相同条目（保留最新的）、把冲突条目加 `<!-- invalidated -->` 标记（不删）。daemon 60s cron tick 每次都调 `maybeRunDream`；按 `dreamIntervalHours` 限速（默认 24h，状态存在 `kv` 表里，重启后还在）。开关是 `settings.memory.dreamCron`（默认 false）。幂等，纯启发式，无 LLM 调用。
-- **Voyager 式 skill library**（`src/skills/library.ts`）—— skill 目录布局 `<name>/{SKILL.md, description.txt, trajectory.jsonl}`，写在 `.claude/hermes/skills/` 下；`description.txt` 上跑 FTS5 检索，写入前过 `src/skills/validate.ts` 的 manifest 校验。`active` 行由 `syncActiveSkills`（`src/skills/bridge.ts`）镜像到 `.claude/skills/hermes_<name>/` 让 Claude Code 内置的 skill 发现机制识别；非 active 行不会被镜像。
-- **Closed learning loop primitives**（`src/learning/closed-loop.ts`）—— `proposeSkillFromTrajectory` 把 `(prompt, reply, tools)` 轨迹压成候选 manifest，`promoteIfVerified` 只有在调用方传的 `runVerify()` 返回 true 时才把候选从 `candidate` 推到 `shadow`。runner 现在每一轮成功之后都会把轨迹喂给 `captureCandidateSkill`（`src/learning/completion-hook.ts`），但**永远停在 `candidate`**：候选写到磁盘 + DB，绝不会自动升 shadow 或 active。升级是人的事。开关是 `settings.learning.captureCandidateSkills`（默认 false）；已有的 shadow / active 行不会被重复抓取覆盖。
-
-### 现在每一轮实际发生什么
-
-1. `execClaude` 拼 appended system prompt：`"You are running inside Claude Hermes."` + repo 模板 + 项目 `CLAUDE.md` + `composeSystemPrompt({memoryScope: "workspace", blocks: readAllBlocks(), includeAgentMemoryHint: true})`（sanitize + tail-truncate MEMORY.md、按字母顺序打出所有 block、末尾附一段 agent-memory hint） + 目录越权守则。
-2. Claude 跑起来，事件流推给 sink（Discord/Telegram/terminal 状态）。
-3. `exitCode === 0` 时 `persistTurn` upsert session 行，并把 user + assistant 两条消息写进 `messages`（自动打 importance 分，FTS5 索引自动更新）。
-4. 如果 `settings.learning.captureCandidateSkills` 打开，runner 后台 fire-and-forget 地调一次 `captureCandidateSkill` —— 非平凡轨迹落地成 `candidate` 行 + Voyager 文件，绝不自动升级。
-5. daemon 60s cron tick 调 `maybeRunDream`（被 `settings.memory.dreamCron` gate 住）和 `syncActiveSkills`，这样 digest 保持 up-to-date、人工晋升的 skill 一分钟之内就能被 spawn 出来的 agent 看到，不用重启 daemon。
-6. 持久化 / sidecar 环节任何异常都被吞掉 —— 回复照常返回给用户。
+- **Identity** —— `prompts/{SOUL,IDENTITY,USER}.md` + 项目 `CLAUDE.md` + `.claude/hermes/memory/` 下的 workspace override。跨轮字节相同，CLI 的 prompt cache 才会命中。
+- **Episodic** —— `state.db` 把每一轮成功调用写进 `messages` 表；FTS5 做搜索，一个轻量的 importance 启发式 + recency / relevance 打分做排序。
+- **Primitives** —— 四个 opt-in 或者人工 gate 的东西，都已经接进 runtime：
+  - `.claude/hermes/memory/blocks/` 下的标签 block 会以 `<block:NAME>…</block>` 的形式打进 system prompt。
+  - `.claude/hermes/memory/agent/` 是 agent 自己的 scratchpad，走六操作协议（`view / create / strReplace / insert / del / rename`）。
+  - 每晚的 `Dream` pass 压缩老消息、去重 `MEMORY.md`。开关是 `settings.memory.dreamCron`。
+  - 学到的 skill 存在 `.claude/hermes/skills/<name>/` 下。`settings.learning.captureCandidateSkills` 打开时，每一轮成功都会自动抓一个 `candidate`；只有你手动把它标成 `active`，它才会被镜像到 `.claude/skills/hermes_<name>/`，spawn 出来的 agent 才看得见。
 
 ## Verify pipeline
 
@@ -148,4 +128,14 @@ bun test tests/integration
 
 ## 致谢
 
-Telegram bridge、Discord bridge、语音转写和最早的 cron/heartbeat 骨架都来自 [moazbuilds/claudeclaw](https://github.com/moazbuilds/claudeclaw)。skills loop 的进化节奏参考了 [yologdev/yoyo-evolve](https://github.com/yologdev/yoyo-evolve)。
+Fork 自 [moazbuilds/claudeclaw](https://github.com/moazbuilds/claudeclaw) —— Telegram bridge、Discord bridge、语音转写、最早的 cron/heartbeat 骨架都来自这里。
+
+自我进化的节奏（小步走、verify 把关、全程写 journal）借自 [yologdev/yoyo-evolve](https://github.com/yologdev/yoyo-evolve)。
+
+记忆层参考了若干开源 agent-memory 项目：
+- **标签 block + 硬字符预算** —— [Letta](https://github.com/letta-ai/letta)（原 MemGPT）。
+- **agent scratchpad 六操作协议**（`view / create / strReplace / insert / del / rename`）—— Anthropic [`memory_20250818`](https://docs.anthropic.com/en/docs/build-with-claude/memory-tool) 工具形状。
+- **Dream 式离线整理**（digest、dedupe、invalidate）—— [Honcho](https://github.com/plastic-labs/honcho)。
+- **`(SKILL.md + description + trajectory)` 结构 + FTS 检索的 skill 库** —— [Voyager](https://github.com/MineDojo/Voyager) 的 skill library 形状。
+- **importance · recency · relevance 打分** —— 斯坦福 Generative Agents 论文（[Park 等，2023](https://arxiv.org/abs/2304.03442)）。
+- **episodic / semantic 分层 + FTS5 当检索骨架** —— 思路上接近 [Zep](https://github.com/getzep/zep) 和 [mem0](https://github.com/mem0ai/mem0)，但砍掉了图 / 向量存储。
