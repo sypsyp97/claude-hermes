@@ -13,6 +13,7 @@ export {
   writeUserMemory,
 } from "./files";
 export { composeSystemPrompt, type ComposeContext } from "./compose";
+export { buildRuntimeMemoryDigest, type RuntimeDigestOptions } from "./runtime-digest";
 export { searchSessions, type SessionSearchParams } from "./search";
 export {
   extractFacts,

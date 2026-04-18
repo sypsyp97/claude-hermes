@@ -99,11 +99,12 @@ Three layers, stable to volatile:
 
 - **Identity** — `prompts/{SOUL,IDENTITY,USER}.md` + project `CLAUDE.md` + per-workspace overrides in `.claude/hermes/memory/`. Byte-identical across turns so the CLI's prompt cache stays warm.
 - **Episodic** — `state.db` logs every successful turn to a `messages` table; FTS5 for search, a small importance heuristic + recency/relevance score for ranking.
+- **Runtime digest** — every Claude invocation injects a deterministic digest from `state.db` into the appended system prompt, so fresh sessions proactively see recent durable facts plus compact snippets from prior persisted conversations.
 - **Primitives** — four opt-in or human-gated pieces, all wired into the runtime:
   - Labeled memory blocks in `.claude/hermes/memory/blocks/` land in the system prompt as `<block:NAME>…</block>`.
   - A scratchpad at `.claude/hermes/memory/agent/` with the six-op protocol (`view / create / strReplace / insert / del / rename`).
   - A nightly `Dream` pass digests old messages and dedupes `MEMORY.md`. Gated by `settings.memory.dreamCron`.
-  - Learned skills live under `.claude/hermes/skills/<name>/`. Every successful turn captures a `candidate` (with the real tool trace from the run) when `settings.learning.captureCandidateSkills` is on; only when *you* mark one `active` does it get mirrored into `.claude/skills/hermes_<name>/` where the spawned agent can see it.
+  - Learned skills live under `.claude/hermes/skills/<name>/`. Candidate capture is on by default and records the real tool trace from each successful turn unless `settings.learning.captureCandidateSkills` is explicitly set to `false`; only when *you* mark one `active` does it get mirrored into `.claude/skills/hermes_<name>/` where the spawned agent can see it.
 
 ## Verify pipeline
 

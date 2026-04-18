@@ -27,6 +27,7 @@ import {
 } from "./paths";
 import { threadKey, workspaceKey } from "./router/session-key";
 import { composeSystemPrompt } from "./memory/compose";
+import { buildRuntimeMemoryDigest } from "./memory/runtime-digest";
 import { readAllBlocks } from "./memory/blocks";
 import { getSharedDb } from "./state/shared-db";
 import { upsertSession } from "./state/repos/sessions";
@@ -810,23 +811,32 @@ async function execClaude(
   }
 
   // Runtime memory layer: pulls <project-root>/memory/MEMORY.md, any
-  // workspace-scoped channel files, all Letta-style memory blocks, and a
-  // hint about the agent-memory scratchpad through the cache-stable
-  // composer. The composer strips ISO-timestamp markers and emits blocks +
-  // hint deterministically so the same facts produce the same appended
-  // prompt across turns — Claude's prompt cache stays hot.
+  // workspace-scoped channel files, all Letta-style memory blocks, a
+  // deterministic digest from `state.db`, and a hint about the
+  // agent-memory scratchpad through the cache-stable composer. The
+  // composer strips volatile timestamp markers from MEMORY.md, while the
+  // SQLite digest omits timestamps entirely and uses recency only for
+  // selection/order, so stable persisted state yields a stable prompt.
   try {
     let blocks: Awaited<ReturnType<typeof readAllBlocks>> = [];
+    let runtimeDigest = "";
     try {
       blocks = await readAllBlocks(process.cwd());
     } catch {
       // Block read failures are non-fatal: compose without them rather than
       // dropping the whole runtime memory layer.
     }
+    try {
+      const db = await getSharedDb(process.cwd());
+      runtimeDigest = buildRuntimeMemoryDigest(db);
+    } catch {
+      // DB digest failures are also non-fatal; file-backed memory still loads.
+    }
     const runtimeMemory = await composeSystemPrompt({
       memoryScope: "workspace",
       cwd: process.cwd(),
       blocks,
+      runtimeDigest,
       includeAgentMemoryHint: true,
     });
     if (runtimeMemory.trim()) appendParts.push(runtimeMemory);

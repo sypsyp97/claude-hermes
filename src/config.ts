@@ -60,7 +60,7 @@ const DEFAULT_SETTINGS: Settings = {
   plugins: { preflightOnStart: false },
   logging: { includeBodies: false },
   memory: { dreamCron: false, dreamIntervalHours: 24, dreamAgeDays: 7 },
-  learning: { captureCandidateSkills: false },
+  learning: { captureCandidateSkills: true },
 };
 
 export interface HeartbeatExcludeWindow {
@@ -145,8 +145,8 @@ export interface LearningConfig {
   /**
    * When true, the runner fires the post-turn `captureCandidateSkill` hook
    * after every successful turn. Captured skills land at status=`candidate`
-   * for human review — the hook never self-promotes to shadow/active. Off
-   * by default; opt in once you trust the slug/description quality.
+   * for human review — the hook never self-promotes to shadow/active. On
+   * by default; set false to opt out for a workspace.
    */
   captureCandidateSkills: boolean;
 }
@@ -360,10 +360,10 @@ function parseSettings(raw: Record<string, any>, discordUserIdsRaw: string[] = [
 }
 
 function parseLearningConfig(raw: any): LearningConfig {
-  const defaults: LearningConfig = { captureCandidateSkills: false };
+  const defaults: LearningConfig = { captureCandidateSkills: true };
   if (!raw || typeof raw !== "object") return { ...defaults };
   return {
-    captureCandidateSkills: raw.captureCandidateSkills === true,
+    captureCandidateSkills: raw.captureCandidateSkills !== false,
   };
 }
 

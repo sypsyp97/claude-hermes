@@ -149,6 +149,15 @@ describe("loadSettings / reloadSettings", () => {
     expect(settings.plugins.preflightOnStart).toBe(false);
   });
 
+  test("fresh init defaults learning.captureCandidateSkills to true", async () => {
+    await config.initConfig();
+    const settings = await config.reloadSettings();
+    const raw = JSON.parse(await Bun.file(SETTINGS_FILE).text());
+
+    expect(raw.learning?.captureCandidateSkills).toBe(true);
+    expect(settings.learning?.captureCandidateSkills).toBe(true);
+  });
+
   test("plugins.preflightOnStart=true is honored from settings.json", async () => {
     await writeSettings(JSON.stringify({ plugins: { preflightOnStart: true } }));
     const settings = await config.reloadSettings();

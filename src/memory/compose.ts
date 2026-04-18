@@ -1,5 +1,6 @@
 /**
- * Compose the 5-layer system prompt (SOUL → IDENTITY → USER → MEMORY → CHANNEL).
+ * Compose the runtime system prompt layers (SOUL → IDENTITY → USER → BLOCKS →
+ * optional state digest → MEMORY → CHANNEL).
  *
  * Missing layers are silently skipped — the prompt is still well-formed,
  * just shorter. Each layer is joined by a blank line so Claude sees them as
@@ -42,6 +43,12 @@ export interface ComposeContext {
    */
   blocks?: Block[];
   /**
+   * Optional compact digest built from persisted SQLite state (`state.db`).
+   * This sits before MEMORY so it survives MEMORY head-trimming when a byte
+   * budget is applied.
+   */
+  runtimeDigest?: string;
+  /**
    * When true, append a deterministic hint paragraph after CHANNEL that
    * points agents at the `<project-root>/memory/agent/` scratchpad and
    * enumerates the six agent-memory ops.
@@ -55,6 +62,8 @@ interface LayerBundle {
   stablePrefix: string[];
   /** Pre-framed `<block:NAME>…</block>` layers, emitted between stablePrefix and MEMORY. Stable under truncation. */
   blocks: string[];
+  /** Optional runtime digest layers sourced from SQLite state. Stable under truncation. */
+  runtime: string[];
   /** Sanitized MEMORY body (timestamp markers already stripped). May be empty. */
   memory: string;
   /** Layers that sit after MEMORY (CHANNEL). */
@@ -106,13 +115,14 @@ async function readLayerBundle(ctx: ComposeContext): Promise<LayerBundle> {
   }
 
   const blocks = framedBlocks(ctx.blocks);
+  const runtime = ctx.runtimeDigest && ctx.runtimeDigest.trim().length > 0 ? [ctx.runtimeDigest] : [];
 
   const trailer: string[] = [];
   if (ctx.includeAgentMemoryHint === true) {
     trailer.push(AGENT_MEMORY_HINT);
   }
 
-  return { stablePrefix, blocks, memory, suffix, trailer };
+  return { stablePrefix, blocks, runtime, memory, suffix, trailer };
 }
 
 /**
@@ -132,6 +142,7 @@ function assemble(bundle: LayerBundle, includeHermesPrefix: boolean): string {
   if (includeHermesPrefix) parts.push(HERMES_PREFIX);
   for (const layer of bundle.stablePrefix) parts.push(layer);
   for (const layer of bundle.blocks) parts.push(layer);
+  for (const layer of bundle.runtime) parts.push(layer);
   if (bundle.memory) parts.push(bundle.memory);
   for (const layer of bundle.suffix) parts.push(layer);
   for (const layer of bundle.trailer) parts.push(layer);

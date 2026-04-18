@@ -18,6 +18,8 @@
  *   HERMES_FAKE_STDERR          custom stderr line
  *   HERMES_FAKE_DELAY_MS        artificial wall-clock delay before writing
  *   HERMES_FAKE_ECHO_PROMPT     "1" -> include stdin prompt in reply (useful for resume tests)
+ *   HERMES_FAKE_ECHO_APPEND_SYSTEM_PROMPT
+ *                              "1" -> include --append-system-prompt in reply
  *
  * When a scenario file is present its fields win over env vars.
  */
@@ -33,6 +35,7 @@ interface Scenario {
   delayMs?: number;
   streamEvents?: unknown[];
   echoPrompt?: boolean;
+  echoAppendSystemPrompt?: boolean;
 }
 
 interface ParsedArgs {
@@ -123,6 +126,7 @@ function envScenario(): Scenario {
   if (process.env.HERMES_FAKE_STDERR) out.stderr = process.env.HERMES_FAKE_STDERR;
   if (process.env.HERMES_FAKE_DELAY_MS) out.delayMs = Number(process.env.HERMES_FAKE_DELAY_MS);
   if (process.env.HERMES_FAKE_ECHO_PROMPT === "1") out.echoPrompt = true;
+  if (process.env.HERMES_FAKE_ECHO_APPEND_SYSTEM_PROMPT === "1") out.echoAppendSystemPrompt = true;
   return out;
 }
 
@@ -154,7 +158,13 @@ async function main() {
 
   const exitCode = scenario.exitCode ?? 0;
   const sessionId = scenario.sessionId ?? defaultSessionId();
-  const baseReply = scenario.reply ?? (scenario.echoPrompt ? `echo: ${prompt}`.trim() : "ok");
+  const baseReply =
+    scenario.reply ??
+    (scenario.echoAppendSystemPrompt
+      ? `[append-system-prompt]\n${args.appendSystemPrompt ?? ""}`.trim()
+      : scenario.echoPrompt
+        ? `echo: ${prompt}`.trim()
+        : "ok");
   const reply = scenario.echoPrompt && !scenario.reply ? `echo: ${prompt}`.trim() : baseReply;
 
   if (scenario.rateLimit) {

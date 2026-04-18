@@ -49,6 +49,7 @@ afterAll(async () => {
   delete process.env.HERMES_FAKE_DELAY_MS;
   delete process.env.HERMES_FAKE_REPLY;
   delete process.env.HERMES_FAKE_ECHO_PROMPT;
+  delete process.env.HERMES_FAKE_ECHO_APPEND_SYSTEM_PROMPT;
   delete process.env.HERMES_FAKE_SESSION_ID;
   delete process.env.HERMES_FAKE_RATE_LIMIT;
   delete process.env.HERMES_FAKE_EXIT;
@@ -59,6 +60,7 @@ afterEach(async () => {
   delete process.env.HERMES_FAKE_DELAY_MS;
   delete process.env.HERMES_FAKE_REPLY;
   delete process.env.HERMES_FAKE_ECHO_PROMPT;
+  delete process.env.HERMES_FAKE_ECHO_APPEND_SYSTEM_PROMPT;
   delete process.env.HERMES_FAKE_SESSION_ID;
   delete process.env.HERMES_FAKE_RATE_LIMIT;
   delete process.env.HERMES_FAKE_EXIT;
@@ -216,6 +218,79 @@ describe("runUserMessage", () => {
     // and a 4-digit year.
     expect(r.stdout).toContain("what time is it");
     expect(r.stdout).toMatch(/20\d{2}/);
+  });
+});
+
+describe("runner proactive DB-backed memory layer", () => {
+  test("fresh turns append a deterministic prior-context section sourced from state.db", async () => {
+    await sessions.resetSession();
+    const sharedDb = await import("./state/shared-db");
+    const sessionsRepo = await import("./state/repos/sessions");
+    const messagesRepo = await import("./state/repos/messages");
+    const memoryRepo = await import("./state/repos/memory");
+
+    const db = await sharedDb.getSharedDb(tmpProj);
+    db.exec("DELETE FROM messages");
+    db.exec("DELETE FROM memory_entries");
+    db.exec("DELETE FROM sessions");
+    const priorSession = sessionsRepo.upsertSession(db, {
+      key: "workspace:seed-prior-context",
+      scope: "workspace",
+      source: "cli",
+      workspace: tmpProj,
+      claudeSessionId: "seed-prior-claude-session",
+    });
+    messagesRepo.appendMessage(db, {
+      sessionId: priorSession.id,
+      ts: "2024-01-01T00:00:00.000Z",
+      role: "user",
+      content: "Previous user request: keep proactive memory enabled.",
+    });
+    messagesRepo.appendMessage(db, {
+      sessionId: priorSession.id,
+      ts: "2024-01-01T00:00:01.000Z",
+      role: "assistant",
+      content: "Previous assistant reply: state.db lives in .claude/hermes/state.db.",
+    });
+    memoryRepo.insertMemory(db, {
+      scope: "workspace",
+      key: "operator-preference",
+      value: "User prefers proactive memory review on fresh turns.",
+      sourceSessionId: priorSession.id,
+    });
+
+    process.env.HERMES_FAKE_ECHO_APPEND_SYSTEM_PROMPT = "1";
+    process.env.HERMES_FAKE_SESSION_ID = "fresh-session-with-prior-context";
+
+    const result = await runner.run("db-backed-prior-context", "start a fresh turn");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("<state-digest>");
+    expect(result.stdout).toContain("Recent durable facts:");
+    expect(result.stdout).toContain(
+      "- workspace.operator-preference = User prefers proactive memory review on fresh turns."
+    );
+    expect(result.stdout).toContain("Recent persisted conversation context:");
+    expect(result.stdout).toContain("- workspace:seed-prior-context [cli/workspace]");
+    expect(result.stdout).toContain("  user: Previous user request: keep proactive memory enabled.");
+    expect(result.stdout).toContain(
+      "  assistant: Previous assistant reply: state.db lives in .claude/hermes/state.db."
+    );
+    expect(result.stdout).toContain("</state-digest>");
+    expect(result.stdout).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+
+    const headerIdx = result.stdout.indexOf("<state-digest>");
+    const memoryIdx = result.stdout.indexOf("Recent durable facts:");
+    const snippetIdx = result.stdout.indexOf("Recent persisted conversation context:");
+    const userIdx = result.stdout.indexOf("  user: Previous user request: keep proactive memory enabled.");
+    const assistantIdx = result.stdout.indexOf(
+      "  assistant: Previous assistant reply: state.db lives in .claude/hermes/state.db."
+    );
+
+    expect(headerIdx).toBeGreaterThanOrEqual(0);
+    expect(memoryIdx).toBeGreaterThan(headerIdx);
+    expect(snippetIdx).toBeGreaterThan(memoryIdx);
+    expect(userIdx).toBeGreaterThan(snippetIdx);
+    expect(assistantIdx).toBeGreaterThan(userIdx);
   });
 });
 
