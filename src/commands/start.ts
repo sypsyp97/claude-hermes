@@ -24,6 +24,8 @@ import {
 } from "../runner";
 import { type StateData, writeState } from "../statusline";
 import { createJobStatusSink } from "../status/job-sink";
+import { maybeRunDream } from "../memory/dream-scheduler";
+import { getSharedDb } from "../state/shared-db";
 import { getDayAndMinuteAtOffset } from "../timezone";
 import {
   detectFirstRun,
@@ -741,6 +743,23 @@ export async function start(args: string[] = []) {
         console.error(`[${ts()}] Cron tick error for ${job.name}:`, err);
       }
     }
+    void (async () => {
+      try {
+        const db = await getSharedDb();
+        const mem = currentSettings.memory ?? {
+          dreamCron: false,
+          dreamIntervalHours: 24,
+          dreamAgeDays: 7,
+        };
+        await maybeRunDream(db, {
+          dreamCron: mem.dreamCron,
+          dreamIntervalHours: mem.dreamIntervalHours,
+          dreamAgeDays: mem.dreamAgeDays,
+        });
+      } catch (err) {
+        console.error(`[${ts()}] dream-scheduler error: ${String(err)}`);
+      }
+    })();
     updateState();
   }, 60_000);
 }

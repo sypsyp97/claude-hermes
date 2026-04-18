@@ -59,6 +59,7 @@ const DEFAULT_SETTINGS: Settings = {
   stt: { baseUrl: "", model: "" },
   plugins: { preflightOnStart: false },
   logging: { includeBodies: false },
+  memory: { dreamCron: false, dreamIntervalHours: 24, dreamAgeDays: 7 },
 };
 
 export interface HeartbeatExcludeWindow {
@@ -123,6 +124,27 @@ export interface Settings {
   stt: SttConfig;
   plugins: PluginsConfig;
   logging: LoggingConfig;
+  /**
+   * Optional in the type so legacy fixtures stay typecheck-green; always
+   * populated at runtime by `parseSettings` from `DEFAULT_SETTINGS.memory`.
+   * Callers should use `settings.memory ?? DEFAULT_SETTINGS.memory` (or a
+   * local fallback) when reading.
+   */
+  memory?: MemoryConfig;
+}
+
+export interface MemoryConfig {
+  /**
+   * When true, the daemon's 60s cron tick invokes `maybeRunDream` so the
+   * Dream consolidation pass fires automatically (rate-limited by
+   * `dreamIntervalHours`). Off by default — opt in once you trust the
+   * digest output.
+   */
+  dreamCron: boolean;
+  /** Minimum hours between auto-runs. Default 24. */
+  dreamIntervalHours: number;
+  /** Messages older than this many days are eligible for digestion. Default 7. */
+  dreamAgeDays: number;
 }
 
 export interface LoggingConfig {
@@ -314,6 +336,23 @@ function parseSettings(raw: Record<string, any>, discordUserIdsRaw: string[] = [
     logging: {
       includeBodies: raw.logging?.includeBodies === true,
     },
+    memory: parseMemoryConfig(raw.memory),
+  };
+}
+
+function parseMemoryConfig(raw: any): MemoryConfig {
+  const defaults: MemoryConfig = { dreamCron: false, dreamIntervalHours: 24, dreamAgeDays: 7 };
+  if (!raw || typeof raw !== "object") return { ...defaults };
+  const intervalHours = Number(raw.dreamIntervalHours);
+  const ageDays = Number(raw.dreamAgeDays);
+  return {
+    dreamCron: raw.dreamCron === true,
+    dreamIntervalHours:
+      Number.isFinite(intervalHours) && intervalHours > 0
+        ? intervalHours
+        : defaults.dreamIntervalHours,
+    dreamAgeDays:
+      Number.isFinite(ageDays) && ageDays > 0 ? ageDays : defaults.dreamAgeDays,
   };
 }
 
