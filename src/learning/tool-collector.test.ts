@@ -26,7 +26,6 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import type { StatusEvent } from "../status/stream";
 import type { TrajectoryToolCall } from "./closed-loop";
 
-// biome-ignore lint/suspicious/noExplicitAny: module does not exist yet; impl agent fills it in.
 let mod: any;
 
 beforeAll(async () => {

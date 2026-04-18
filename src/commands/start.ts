@@ -97,10 +97,10 @@ export async function checkStartupPreconditions(_cwd?: string): Promise<StartupP
   // Best-effort sidecar migrators — their failures never flip preflight
   // non-ok, matching the pre-refactor behaviour.
   try {
-    const result = await migrateLegacyMemory();
-    if (result.moved.length > 0) {
+    const result = await migrateLegacyMemory(undefined, { home: homedir() });
+    if (result.moved.length > 0 || result.skipped.length > 0) {
       console.log(
-        `[${new Date().toLocaleTimeString()}] Migrated legacy memory dir → <cwd>/memory/ (${result.moved.length} file(s)${result.skipped.length > 0 ? `, ${result.skipped.length} skipped` : ""}).`,
+        `[${new Date().toLocaleTimeString()}] Migrated stale memory into <cwd>/memory/ (${result.moved.length} moved${result.skipped.length > 0 ? `, ${result.skipped.length} skipped` : ""}).`,
       );
     }
   } catch (err) {

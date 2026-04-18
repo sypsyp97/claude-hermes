@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 /**
  * Helpers for the `~/.claude/` project directory layout that Claude Code
  * itself maintains (separate from anything hermes writes).
@@ -17,4 +19,16 @@
 
 export function projectSlugFromCwd(cwd: string = process.cwd()): string {
   return cwd.replace(/[\\/:]/g, "-");
+}
+
+export function claudeProjectsDir(home: string): string {
+  return join(home, ".claude", "projects");
+}
+
+export function claudeProjectDir(home: string, cwd: string = process.cwd()): string {
+  return join(claudeProjectsDir(home), projectSlugFromCwd(cwd));
+}
+
+export function claudeProjectMemoryDir(home: string, cwd: string = process.cwd()): string {
+  return join(claudeProjectDir(home, cwd), "memory");
 }

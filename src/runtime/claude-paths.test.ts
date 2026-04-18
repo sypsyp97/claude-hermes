@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { projectSlugFromCwd } from "./claude-paths";
+import { join } from "node:path";
+import {
+  claudeProjectDir,
+  claudeProjectMemoryDir,
+  claudeProjectsDir,
+  projectSlugFromCwd,
+} from "./claude-paths";
 
 describe("projectSlugFromCwd", () => {
   test("posix path: leading / becomes leading -, separators become -", () => {
@@ -27,5 +33,23 @@ describe("projectSlugFromCwd", () => {
     const slug = projectSlugFromCwd();
     expect(slug.length).toBeGreaterThan(0);
     expect(slug).not.toMatch(/[\\/:]/);
+  });
+});
+
+describe("Claude project helpers", () => {
+  test("claudeProjectsDir points at ~/.claude/projects under the provided home", () => {
+    expect(claudeProjectsDir("/tmp/home")).toBe(join("/tmp/home", ".claude", "projects"));
+  });
+
+  test("claudeProjectDir nests the cwd-derived slug under ~/.claude/projects", () => {
+    expect(claudeProjectDir("/tmp/home", "/Users/sun/projects/foo")).toBe(
+      join("/tmp/home", ".claude", "projects", "-Users-sun-projects-foo")
+    );
+  });
+
+  test("claudeProjectMemoryDir appends /memory under the Claude project dir", () => {
+    expect(claudeProjectMemoryDir("/tmp/home", "C:\\Users\\sun\\Downloads\\hermes")).toBe(
+      join("/tmp/home", ".claude", "projects", "C--Users-sun-Downloads-hermes", "memory")
+    );
   });
 });

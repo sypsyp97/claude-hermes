@@ -21,9 +21,10 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { projectSlugFromCwd } from "../runtime/claude-paths";
 
 type MigrateResult = { moved: string[]; skipped: string[] };
-type Migrator = (cwd: string) => Promise<MigrateResult>;
+type Migrator = (cwd: string, opts?: { home?: string }) => Promise<MigrateResult>;
 
 async function loadMigrator(): Promise<Migrator> {
   // Prefer the spec-preferred home (files.ts). Fall back to a sibling
@@ -46,11 +47,15 @@ async function loadMigrator(): Promise<Migrator> {
 let tmp: string;
 let legacy: string;
 let neo: string;
+let fakeHome: string;
+let claudeProjectsLegacy: string;
 
 beforeEach(async () => {
   tmp = await mkdtemp(join(tmpdir(), "hermes-mem-migrate-"));
   legacy = join(tmp, ".claude", "hermes", "memory");
   neo = join(tmp, "memory");
+  fakeHome = join(tmp, "home");
+  claudeProjectsLegacy = join(fakeHome, ".claude", "projects", projectSlugFromCwd(tmp), "memory");
 });
 
 afterEach(async () => {
@@ -129,5 +134,18 @@ describe("migrateLegacyMemory — branches", () => {
     const second = await migrate(tmp);
     expect(second).toEqual({ moved: [], skipped: [] });
     expect(await readFile(join(neo, "MEMORY.md"), "utf8")).toBe("mem\n");
+  });
+
+  test("Claude Code auto-memory under ~/.claude/projects/<slug>/memory also migrates into project-root memory/", async () => {
+    await mkdir(join(claudeProjectsLegacy, "feedback"), { recursive: true });
+    await writeFile(join(claudeProjectsLegacy, "feedback", "f1.md"), "fact\n", "utf8");
+
+    const migrate = await loadMigrator();
+    const result = await migrate(tmp, { home: fakeHome });
+
+    expect(await readFile(join(neo, "feedback", "f1.md"), "utf8")).toBe("fact\n");
+    const normalized = result.moved.map((p) => p.replace(/\\/g, "/")).sort();
+    expect(normalized).toEqual(["feedback/f1.md"]);
+    expect(existsSync(join(claudeProjectsLegacy, "feedback", "f1.md"))).toBe(false);
   });
 });

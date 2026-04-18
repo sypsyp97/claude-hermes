@@ -25,6 +25,7 @@ import {
   soulMemoryFile,
   userMemoryFile,
 } from "../paths";
+import { claudeProjectMemoryDir } from "../runtime/claude-paths";
 
 export async function readSoul(cwd?: string): Promise<string> {
   return readIfExists(soulMemoryFile(cwd));
@@ -84,27 +85,55 @@ async function writeWithMkdir(path: string, content: string): Promise<void> {
 }
 
 /**
- * One-shot migration of memory files from the legacy `.claude/hermes/memory/`
- * location to the project-root `memory/` location.
+ * One-shot migration of stale memory files into the project-root `memory/`
+ * location.
  *
- * Returns `{ moved, skipped }` where paths are relative to the legacy root.
+ * Sources, in priority order:
+ *   1. `<cwd>/.claude/hermes/memory/` (legacy hermes-owned location)
+ *   2. `<home>/.claude/projects/<slug>/memory/` (Claude Code auto-memory)
+ *
+ * Returns `{ moved, skipped }` where paths are relative to the source root.
  * Idempotent: a second invocation on a clean state is a no-op.
  *
- * - If the legacy dir doesn't exist, returns empty arrays.
- * - If the new dir doesn't exist, renames the whole tree atomically when
- *   possible, falling back to a per-file copy on cross-device rename errors.
- * - If both exist, walks the legacy tree; for each file, moves it to the new
+ * - If a source dir doesn't exist, it is ignored.
+ * - If the new dir doesn't exist, renames the whole source tree atomically
+ *   when possible, falling back to a per-file copy on cross-device rename
+ *   errors.
+ * - If both exist, walks the source tree; for each file, moves it to the new
  *   path iff the destination file does not already exist. Otherwise the legacy
  *   file stays put and its relative path is added to `skipped`.
  *
  * Uses only `fs/promises` (no Bun-only APIs) so it can be imported from tests
  * that stub `process.cwd()` via chdir into a tmpdir.
  */
-export async function migrateLegacyMemory(cwd?: string): Promise<{ moved: string[]; skipped: string[] }> {
-  const legacyRoot = legacyMemoryDir(cwd);
+export async function migrateLegacyMemory(
+  cwd?: string,
+  opts: { home?: string } = {}
+): Promise<{ moved: string[]; skipped: string[] }> {
   const newRoot = memoryDir(cwd);
+  const sourceRoots = [legacyMemoryDir(cwd)];
+  if (opts.home) {
+    sourceRoots.push(claudeProjectMemoryDir(opts.home, cwd));
+  }
 
-  if (!existsSync(legacyRoot)) {
+  const moved = new Set<string>();
+  const skipped = new Set<string>();
+  for (const sourceRoot of sourceRoots) {
+    const result = await migrateMemoryTree(sourceRoot, newRoot);
+    for (const rel of result.moved) moved.add(rel);
+    for (const rel of result.skipped) {
+      if (!moved.has(rel)) skipped.add(rel);
+    }
+  }
+
+  return { moved: [...moved], skipped: [...skipped] };
+}
+
+async function migrateMemoryTree(
+  sourceRoot: string,
+  newRoot: string
+): Promise<{ moved: string[]; skipped: string[] }> {
+  if (!existsSync(sourceRoot)) {
     return { moved: [], skipped: [] };
   }
 
@@ -114,10 +143,10 @@ export async function migrateLegacyMemory(cwd?: string): Promise<{ moved: string
   // Fast path: destination doesn't exist — rename the whole tree.
   if (!existsSync(newRoot)) {
     // Collect relative paths first so we can report `moved` accurately.
-    const files = await collectFiles(legacyRoot);
+    const files = await collectFiles(sourceRoot);
     await mkdir(dirname(newRoot), { recursive: true });
     try {
-      await rename(legacyRoot, newRoot);
+      await rename(sourceRoot, newRoot);
       for (const file of files) moved.push(file);
       return { moved, skipped };
     } catch {
@@ -126,10 +155,10 @@ export async function migrateLegacyMemory(cwd?: string): Promise<{ moved: string
   }
 
   // Slow path: walk and move per-file.
-  await walkAndMove(legacyRoot, legacyRoot, newRoot, moved, skipped);
+  await walkAndMove(sourceRoot, sourceRoot, newRoot, moved, skipped);
 
   // Prune empty legacy subdirectories (best-effort).
-  await pruneEmptyDirs(legacyRoot);
+  await pruneEmptyDirs(sourceRoot);
 
   return { moved, skipped };
 }
