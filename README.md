@@ -88,9 +88,40 @@ See [docs/MULTI_SESSION.md](docs/MULTI_SESSION.md) for the routing details.
   - `moderate` → all tools; scoped to project dir.
   - `unrestricted` → all tools, no directory scoping.
 - **Skill auto-promotion:** after ≥20 runs in a 7-day window with ≥85% success rate, a candidate skill is promoted to `active`. If success drops below 70% in the rollback window after promotion, it demotes back to `shadow`. Thresholds live in `src/learning/config.ts` and are tunable.
+- **Evolve safety guards:** the self-edit subagent's system prompt is always prefixed with hard rules — no `git stash`, no branch switching, no `--no-verify`, no force push, no writes outside the cwd. The guards live in `prompts/EVOLVE_GUARDS.md` with a conservative inline fallback so they can never go silent.
 - **Crash-safe daemon registry:** `~/.claude/hermes/daemons.json` uses atomic tmp-write + rename, so a SIGKILL mid-write can't wipe the registry.
 - **Parent-daemon protection:** `/stop`, `/stop-all`, and `/clear` invoked from inside a daemon's own Claude child never kill the daemon that's running them.
 - **Rate-limit retries:** Discord reaction PUTs go through a shared `discordApi` helper that honors `Retry-After` on 429s instead of silently dropping.
+
+## Memory system
+
+The memory layer is split into three tiers, ordered from most to least stable:
+
+**1. Identity (markdown, human-editable, cache-friendly prefix)**
+- `prompts/{IDENTITY,USER,SOUL}.md` — repo-level templates, committed to git.
+- `CLAUDE.md` at the project root — per-project instructions.
+- `.claude/hermes/memory/{SOUL,IDENTITY,USER}.md` — per-workspace overrides.
+
+These form the stable head of every `--append-system-prompt` and are meant to stay byte-identical across turns so the CLI's prompt cache hits. See [design notes in `src/memory/compose.ts`](src/memory/compose.ts) for the sanitization rules (ISO-timestamp markers in `MEMORY.md` are stripped; oldest entries get head-trimmed when over a byte cap; nothing volatile leaks into the prefix).
+
+**2. Episodic state (SQLite, append-only, FTS-indexed)**
+- `state.db` → `messages` table, populated on every successful turn by `persistTurn`. Each row carries `importance` (1–10, set by a heuristic: user=6, assistant=5, tool=3, system=4, +2 per occurrence of `remember`/`todo`/`?`, clamped at 10), `last_access`, and `digested_at`.
+- FTS5 virtual tables: `messages_fts` for cross-session search, `skill_descriptions_fts` for retrieval over skill docs.
+- Park-style scoring (`α·recency + β·importance + γ·relevance`, with `recency = exp(-h/24)`) lives in `src/memory/scoring.ts`; `searchWithScoring` returns ranked hits.
+
+**3. Primitives (ready to wire; most not yet auto-invoked)**
+- **Letta-style blocks** (`src/memory/blocks.ts`) — labeled slots (`persona`, `human`, `project`, `channel:<id>`) with hard char budgets; over-budget writes throw rather than silently truncate.
+- **Anthropic `memory_20250818` six-op API** (`src/memory/agent-memory.ts`) — `view / create / strReplace / insert / del / rename`, all scoped to `.claude/hermes/memory/agent/`. Path traversal is rejected by a single gatekeeper.
+- **Honcho-style Dream cron** (`src/memory/dream.ts`) — `runDream` digests messages older than `ageDays` into per-session summaries, dedupes `MEMORY.md` entries keeping the newest, marks contradicting entries with `<!-- invalidated -->` (never deletes). Idempotent, heuristic-only, no LLM calls.
+- **Voyager-style skill library** (`src/skills/library.ts`) — skills live as `<name>/{SKILL.md, description.txt, trajectory.jsonl}`; FTS5 over `description.txt` for retrieval; writes are gated by the validator in `src/skills/validate.ts`.
+- **Closed-learning-loop primitives** (`src/learning/closed-loop.ts`) — `proposeSkillFromTrajectory` turns a `(prompt, reply, tools)` trace into a candidate manifest, then `promoteIfVerified` moves it `candidate → shadow` only when a caller-supplied `runVerify()` gate returns green.
+
+### What actually happens each turn today
+
+1. `execClaude` composes the appended system prompt: `"You are running inside Claude Hermes."` + repo templates + project `CLAUDE.md` + runtime memory via `composeSystemPrompt({memoryScope: "workspace"})` (which sanitizes and tail-truncates MEMORY.md) + directory scope guard.
+2. Claude runs, streams events to the sink (Discord/Telegram/terminal status).
+3. On `exitCode === 0`, `persistTurn` upserts the session row and appends user + assistant messages to `messages` (with heuristic importance, FTS5 index auto-updated).
+4. Any persistence error is swallowed — the reply is returned regardless.
 
 ## Verify pipeline
 
