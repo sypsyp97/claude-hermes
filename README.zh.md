@@ -103,7 +103,7 @@ daemon 按频道名自动路由：
   - `.claude/hermes/memory/blocks/` 下的标签 block 会以 `<block:NAME>…</block>` 的形式打进 system prompt。
   - `.claude/hermes/memory/agent/` 是 agent 自己的 scratchpad，走六操作协议（`view / create / strReplace / insert / del / rename`）。
   - 每晚的 `Dream` pass 压缩老消息、去重 `MEMORY.md`。开关是 `settings.memory.dreamCron`。
-  - 学到的 skill 存在 `.claude/hermes/skills/<name>/` 下。`settings.learning.captureCandidateSkills` 打开时，每一轮成功都会自动抓一个 `candidate`；只有你手动把它标成 `active`，它才会被镜像到 `.claude/skills/hermes_<name>/`，spawn 出来的 agent 才看得见。
+  - 学到的 skill 存在 `.claude/hermes/skills/<name>/` 下。`settings.learning.captureCandidateSkills` 打开时，每一轮成功都会自动抓一个 `candidate`（带这轮真实的 tool 调用 trace）；只有你手动把它标成 `active`，它才会被镜像到 `.claude/skills/hermes_<name>/`，spawn 出来的 agent 才看得见。
 
 ## Verify pipeline
 

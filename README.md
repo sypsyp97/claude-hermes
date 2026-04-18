@@ -103,7 +103,7 @@ Three layers, stable to volatile:
   - Labeled memory blocks in `.claude/hermes/memory/blocks/` land in the system prompt as `<block:NAME>…</block>`.
   - A scratchpad at `.claude/hermes/memory/agent/` with the six-op protocol (`view / create / strReplace / insert / del / rename`).
   - A nightly `Dream` pass digests old messages and dedupes `MEMORY.md`. Gated by `settings.memory.dreamCron`.
-  - Learned skills live under `.claude/hermes/skills/<name>/`. Every successful turn captures a `candidate` when `settings.learning.captureCandidateSkills` is on; only when *you* mark one `active` does it get mirrored into `.claude/skills/hermes_<name>/` where the spawned agent can see it.
+  - Learned skills live under `.claude/hermes/skills/<name>/`. Every successful turn captures a `candidate` (with the real tool trace from the run) when `settings.learning.captureCandidateSkills` is on; only when *you* mark one `active` does it get mirrored into `.claude/skills/hermes_<name>/` where the spawned agent can see it.
 
 ## Verify pipeline
 
