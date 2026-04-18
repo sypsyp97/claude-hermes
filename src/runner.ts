@@ -25,6 +25,7 @@ import {
   projectClaudeMdFile,
   promptsDir,
 } from "./paths";
+import { threadKey, workspaceKey } from "./router/session-key";
 import { composeSystemPrompt } from "./memory/compose";
 import { readAllBlocks } from "./memory/blocks";
 import { getSharedDb } from "./state/shared-db";
@@ -103,6 +104,7 @@ async function persistTurn(opts: {
   source: string;
   scope: string;
   workspace: string;
+  thread?: string;
   claudeSessionId: string;
   userPrompt: string;
   assistantReply: string;
@@ -114,6 +116,7 @@ async function persistTurn(opts: {
       scope: opts.scope,
       source: opts.source,
       workspace: opts.workspace,
+      thread: opts.thread ?? null,
       claudeSessionId: opts.claudeSessionId,
     });
     appendMessage(db, {
@@ -941,15 +944,24 @@ async function execClaude(
   // failures here never propagate. Only persist when we have a usable Claude
   // session id and the run actually succeeded — failed turns shouldn't pollute
   // the FTS index with empty assistant rows.
+  //
+  // Keys MUST match the router's canonical session-key contract
+  // (`src/router/session-key.ts`) so router-driven lookups and persisted rows
+  // join correctly: `thread:<source>:<thread>` for per-thread runs,
+  // `workspace:<hash>` for the workspace lane. Pre-fix, the runner wrote
+  // shadow rows under `<source>:<thread>` / bare `sessionId`, which never
+  // joined to the live session-manager rows.
   if (exitCode === 0 && !rateLimitMessage && sessionId && sessionId !== "unknown") {
-    const persistKey = threadId ? queueKey(threadId, source) : sessionId;
+    const persistKey = threadId ? threadKey(source, threadId) : workspaceKey(process.cwd());
+    const persistScope = threadId ? "per-thread" : "workspace";
     const persistSource = threadId ? source : "cli";
     await persistTurn({
       cwd: process.cwd(),
       key: persistKey,
       source: persistSource,
-      scope: "workspace",
+      scope: persistScope,
       workspace: process.cwd(),
+      thread: threadId,
       claudeSessionId: sessionId,
       userPrompt: prompt,
       assistantReply: stdout,

@@ -11,7 +11,20 @@ import { newCmd } from "./commands/new";
 const args = process.argv.slice(2);
 const command = args[0];
 
-if (command === "--stop-all") {
+const KNOWN_FLAGS = new Set(["--stop-all", "--stop", "--clear"]);
+const KNOWN_SUBCOMMANDS = new Set([
+  "start",
+  "status",
+  "telegram",
+  "discord",
+  "send",
+  "preflight",
+  "new",
+]);
+
+if (command === undefined) {
+  await start();
+} else if (command === "--stop-all") {
   await stopAll();
 } else if (command === "--stop") {
   await stop();
@@ -31,6 +44,15 @@ if (command === "--stop-all") {
   preflight(args.slice(1));
 } else if (command === "new") {
   await newCmd(args.slice(1));
-} else {
+} else if (KNOWN_FLAGS.has(command) || KNOWN_SUBCOMMANDS.has(command)) {
+  // unreachable — above if/else already covers every known token; kept as a
+  // safety net so adding a new entry to KNOWN_SUBCOMMANDS without wiring a
+  // branch falls through to the real handler list instead of the error arm.
   await start();
+} else {
+  console.error(`unknown command: ${command}`);
+  console.error(
+    `known subcommands: ${[...KNOWN_SUBCOMMANDS].join(", ")} (or ${[...KNOWN_FLAGS].join(", ")})`,
+  );
+  process.exit(2);
 }

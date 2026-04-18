@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const REPO_ROOT = process.cwd();
@@ -108,4 +110,87 @@ describe("plugin install-time contract", () => {
     const text = await readFile(join(REPO_ROOT, ".github", "pull_request_template.md"), "utf8");
     expect(text).toContain("bun run verify");
   });
+});
+
+// ----------------------------------------------------------------------
+// Finding #8: unknown subcommand must fail loudly, not silently fall
+// through to `await start()`. Today `src/index.ts:34` dispatches any
+// unmatched argv to `start()`, so `bun run src/index.ts doesnotexist`
+// boots the daemon. A typo becomes a real side effect.
+// ----------------------------------------------------------------------
+describe("unknown CLI subcommand (Finding #8)", () => {
+  test("bun run src/index.ts <typo> exits non-zero without starting the daemon", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "hermes-unknown-cmd-"));
+    const hermesDir = join(tempDir, ".claude", "hermes");
+    await mkdir(hermesDir, { recursive: true });
+    try {
+      const child = spawn("bun", ["run", join(REPO_ROOT, "src", "index.ts"), "doesnotexist"], {
+        cwd: tempDir,
+        env: {
+          ...process.env,
+          HERMES_CLAUDE_BIN: `bun run ${join(REPO_ROOT, "tests", "fixtures", "fake-claude.ts")}`,
+          HERMES_SKIP_PREFLIGHT: "1",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const out: Buffer[] = [];
+      const err: Buffer[] = [];
+      child.stdout.on("data", (d) => out.push(Buffer.from(d)));
+      child.stderr.on("data", (d) => err.push(Buffer.from(d)));
+      // The fix makes the child exit immediately with a clear error. Today
+      // it falls through to `await start()` and the daemon enters its hot
+      // loop, so we cap the wait at 5s and kill the child. If the child
+      // died on its own (fix shipped), we observe the real exit code; if
+      // it was still running, `timedOut === true` and the test treats
+      // that as a failure too (typos must NOT cause a daemon to boot).
+      const result = await new Promise<{
+        stdout: string;
+        stderr: string;
+        exitCode: number | null;
+        timedOut: boolean;
+      }>((resolve) => {
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          try {
+            child.kill("SIGKILL");
+          } catch {}
+        }, 5_000);
+        child.on("error", () => {
+          clearTimeout(timer);
+          resolve({
+            stdout: Buffer.concat(out).toString("utf8"),
+            stderr: Buffer.concat(err).toString("utf8"),
+            exitCode: null,
+            timedOut,
+          });
+        });
+        child.on("close", (code) => {
+          clearTimeout(timer);
+          resolve({
+            stdout: Buffer.concat(out).toString("utf8"),
+            stderr: Buffer.concat(err).toString("utf8"),
+            exitCode: code,
+            timedOut,
+          });
+        });
+      });
+
+      // Hard red: a timed-out wait means the daemon entered its hot
+      // loop on an unknown command. That IS the bug.
+      expect(result.timedOut).toBe(false);
+      // Must exit non-zero — typos cannot be treated as "run the daemon".
+      expect(result.exitCode).not.toBe(0);
+      // Error must name the unknown command so the user can see what
+      // they mistyped.
+      const combined = (result.stdout + result.stderr).toLowerCase();
+      expect(combined).toContain("doesnotexist");
+      // And no daemon pid file should have been written in the tmp cwd.
+      const pidPath = join(hermesDir, "daemon.pid");
+      const pidFile = Bun.file(pidPath);
+      expect(await pidFile.exists()).toBe(false);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }, 20_000);
 });

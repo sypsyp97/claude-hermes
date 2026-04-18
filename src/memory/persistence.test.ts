@@ -183,7 +183,7 @@ describe("execClaude message persistence", () => {
       expect(r.exitCode).toBe(0);
 
       const db = await ws.shared.getSharedDb();
-      const threadSession = ws.sessionsRepo.getByKey(db, "discord:channel-123");
+      const threadSession = ws.sessionsRepo.getByKey(db, "thread:discord:channel-123");
       expect(threadSession).not.toBeNull();
       expect(threadSession!.source).toBe("discord");
 

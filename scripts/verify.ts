@@ -44,22 +44,42 @@ const STEPS: StepDef[] = [
 
 const FAST_STEPS: StepName[] = ["typecheck", "unit"];
 
-function parseArgs(argv: string[]): {
+interface ParsedArgs {
   fast: boolean;
   jsonOnly: boolean;
   only: StepName[] | null;
-} {
+  error: string | null;
+}
+
+const KNOWN_STEP_NAMES: Set<string> = new Set(STEPS.map((s) => s.name));
+
+function parseArgs(argv: string[]): ParsedArgs {
   let fast = false;
   let jsonOnly = false;
   let only: StepName[] | null = null;
+  let error: string | null = null;
   for (const a of argv) {
     if (a === "--fast") fast = true;
     else if (a === "--json") jsonOnly = true;
     else if (a.startsWith("--only=")) {
-      only = a.slice("--only=".length).split(",").filter(Boolean) as StepName[];
+      const raw = a
+        .slice("--only=".length)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (raw.length === 0) {
+        error = `--only= requires at least one step name (got empty list). Valid names: ${[...KNOWN_STEP_NAMES].join(", ")}`;
+        continue;
+      }
+      const bad = raw.filter((n) => !KNOWN_STEP_NAMES.has(n));
+      if (bad.length > 0) {
+        error = `--only=: unknown step name(s) ${bad.map((b) => JSON.stringify(b)).join(", ")}. Valid names: ${[...KNOWN_STEP_NAMES].join(", ")}`;
+        continue;
+      }
+      only = raw as StepName[];
     }
   }
-  return { fast, jsonOnly, only };
+  return { fast, jsonOnly, only, error };
 }
 
 function runStep(step: StepDef): Promise<StepResult> {
@@ -115,7 +135,17 @@ function human(result: StepResult): string {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.error) {
+    process.stderr.write(`verify: ${args.error}\n`);
+    process.exit(2);
+  }
   const steps = selectSteps(args);
+  if (steps.length === 0) {
+    process.stderr.write(
+      `verify: no steps selected (STEPS would be empty). This should never happen — file a bug.\n`
+    );
+    process.exit(2);
+  }
   const results: StepResult[] = [];
   let allOk = true;
 

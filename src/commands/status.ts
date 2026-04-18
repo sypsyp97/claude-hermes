@@ -1,7 +1,7 @@
 import { join } from "path";
-import { readdir, readFile } from "fs/promises";
-import { homedir } from "os";
+import { readdir } from "fs/promises";
 import { hermesDir, jobsDir, pidFile as pidFilePath, settingsFile } from "../paths";
+import { listDaemons } from "../runtime/daemon-registry";
 
 function formatCountdown(ms: number): string {
   if (ms <= 0) return "now!";
@@ -13,35 +13,26 @@ function formatCountdown(ms: number): string {
   return "<1m";
 }
 
-function decodePath(encoded: string): string {
-  return "/" + encoded.slice(1).replace(/-/g, "/");
-}
-
-async function findAllDaemons(): Promise<{ path: string; pid: string }[]> {
-  const projectsDir = join(homedir(), ".claude", "projects");
-  const results: { path: string; pid: string }[] = [];
-
-  let dirs: string[];
-  try {
-    dirs = await readdir(projectsDir);
-  } catch {
-    return results;
-  }
-
-  for (const dir of dirs) {
-    const candidatePath = decodePath(dir);
-    const pidFile = pidFilePath(candidatePath);
-
+/**
+ * Source of truth for "which daemons are running right now?" is the project
+ * registry at `<cwd>/.claude/hermes/daemons.json` (honouring the
+ * `HERMES_DAEMON_REGISTRY` env override used by tests). The previous
+ * approach — scanning `~/.claude/projects` and reversing the slug — mangled
+ * any workspace path containing a hyphen (`my-app` → `/my/app`). Hyphenated
+ * paths round-trip verbatim through the registry.
+ */
+export async function findAllDaemons(): Promise<{ path: string; pid: number }[]> {
+  const entries = await listDaemons();
+  const out: { path: string; pid: number }[] = [];
+  for (const entry of entries) {
     try {
-      const pid = (await readFile(pidFile, "utf-8")).trim();
-      process.kill(Number(pid), 0);
-      results.push({ path: candidatePath, pid });
+      process.kill(entry.pid, 0);
+      out.push({ path: entry.cwd, pid: entry.pid });
     } catch {
-      // no pid file or process dead
+      // dead pid — skip, leave stale entry for the registry's self-healing
     }
   }
-
-  return results;
+  return out;
 }
 
 async function showAll(): Promise<void> {

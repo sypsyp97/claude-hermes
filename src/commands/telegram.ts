@@ -867,7 +867,8 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       chatId,
       ...(threadId !== undefined && { threadId }),
     });
-    const result = await runUserMessage("telegram", prefixedPrompt, undefined, statusSink, "telegram");
+    const threadArg = threadId !== undefined ? String(threadId) : undefined;
+    const result = await runUserMessage("telegram", prefixedPrompt, threadArg, statusSink, "telegram");
 
     if (result.exitCode !== 0) {
       await sendMessage(config.token, chatId, `Error (exit ${result.exitCode}): ${result.stderr || "Unknown error"}`, threadId);

@@ -40,28 +40,62 @@ import {
 
 const PREFLIGHT_SCRIPT = fileURLToPath(new URL("../preflight.ts", import.meta.url));
 
-async function runMigrationIfAny(): Promise<void> {
+/**
+ * Preflight sequence run before any user-visible action (one-shot prompt OR
+ * daemon boot). Ordering is load-bearing:
+ *
+ *  1. PID check — if a daemon is already live in this cwd, bail. We MUST NOT
+ *     invoke the migrator before this check: `migrateIfNeeded` does
+ *     `cp(...)` then `rename(source, archivedAs)`, so running it against a
+ *     workspace that has a live daemon would move `.claude/claudeclaw` out
+ *     from under the running process.
+ *  2. Core migrator — refuse to proceed on `conflict` (both legacy and new
+ *     dirs exist with no MIGRATED.json marker). Partial migration state is
+ *     fail-closed: the user needs to intervene.
+ *
+ * Memory + global-registry migrators (lines below) are best-effort and
+ * never cause a non-"ok" preflight status — they ran to completion in the
+ * pre-refactor code path and continue to do so here.
+ */
+export interface StartupPrecondition {
+  status: "ok" | "daemon-running" | "migration-conflict" | "migration-failed";
+  pid?: number;
+  message?: string;
+}
+
+export async function checkStartupPreconditions(_cwd?: string): Promise<StartupPrecondition> {
+  const existingPid = await checkExistingDaemon();
+  if (existingPid) {
+    return {
+      status: "daemon-running",
+      pid: existingPid,
+      message: `daemon already running in this directory (PID ${existingPid})`,
+    };
+  }
+
   try {
     const result = await migrateIfNeeded();
+    if (result.status === "conflict") {
+      return {
+        status: "migration-conflict",
+        message:
+          "Legacy .claude/claudeclaw still exists alongside .claude/hermes without a MIGRATED.json marker. Refusing to boot — resolve the conflict manually (rename or delete the legacy dir) and try again.",
+      };
+    }
     if (result.status === "migrated") {
       console.log(
         `[${new Date().toLocaleTimeString()}] Migrated legacy .claude/claudeclaw → .claude/hermes (${result.filesCopied ?? 0} file(s)). Archived source: ${result.archivedAs}`,
       );
-    } else if (result.status === "conflict") {
-      console.warn(
-        `[${new Date().toLocaleTimeString()}] Legacy .claude/claudeclaw still exists alongside .claude/hermes; manual cleanup required.`,
-      );
     }
   } catch (err) {
-    console.error(
-      `[${new Date().toLocaleTimeString()}] Migration failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    return {
+      status: "migration-failed",
+      message: `Migration failed — aborting startup: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
 
-  // Move memory files from `.claude/hermes/memory/` → `<cwd>/memory/`. The
-  // auto-memory system prompt injected by Claude Code expects project-root
-  // `memory/`, so living under `.claude/hermes/` meant the agent's own memory
-  // was invisible to it. Best-effort: migration failure must not block boot.
+  // Best-effort sidecar migrators — their failures never flip preflight
+  // non-ok, matching the pre-refactor behaviour.
   try {
     const result = await migrateLegacyMemory();
     if (result.moved.length > 0) {
@@ -75,9 +109,6 @@ async function runMigrationIfAny(): Promise<void> {
     );
   }
 
-  // Move daemon-registry entries from `~/.claude/hermes/daemons.json` →
-  // `<cwd>/.claude/hermes/daemons.json` for this project. Same best-effort
-  // contract as the memory migrator.
   try {
     const result = await migrateGlobalRegistry({ home: homedir() });
     if (result.migrated > 0) {
@@ -89,6 +120,25 @@ async function runMigrationIfAny(): Promise<void> {
     console.error(
       `[${new Date().toLocaleTimeString()}] Registry migration failed: ${err instanceof Error ? err.message : String(err)}`,
     );
+  }
+
+  return { status: "ok" };
+}
+
+/**
+ * Exit-code map for non-ok preflight results. Keep these stable — tests +
+ * shell wrappers pin on them.
+ */
+function preflightExitCode(status: StartupPrecondition["status"]): number {
+  switch (status) {
+    case "daemon-running":
+      return 1;
+    case "migration-conflict":
+      return 2;
+    case "migration-failed":
+      return 3;
+    default:
+      return 0;
   }
 }
 
@@ -326,16 +376,15 @@ export async function start(args: string[] = []) {
 
   // One-shot mode: explicit prompt without trigger.
   if (hasPromptFlag && !hasTriggerFlag) {
-    await runMigrationIfAny();
-    const existingPid = await checkExistingDaemon();
-    if (existingPid) {
-      console.error(
-        `\x1b[31mAborted: daemon already running in this directory (PID ${existingPid})\x1b[0m`,
-      );
-      console.error(
-        "Use `claude-hermes send <message> [--telegram] [--discord]` while daemon is running.",
-      );
-      process.exit(1);
+    const pre = await checkStartupPreconditions();
+    if (pre.status !== "ok") {
+      console.error(`\x1b[31mAborted: ${pre.message}\x1b[0m`);
+      if (pre.status === "daemon-running") {
+        console.error(
+          "Use `claude-hermes send <message> [--telegram] [--discord]` while daemon is running.",
+        );
+      }
+      process.exit(preflightExitCode(pre.status));
     }
 
     await initConfig();
@@ -347,17 +396,13 @@ export async function start(args: string[] = []) {
     return;
   }
 
-  await runMigrationIfAny();
-  const existingPid = await checkExistingDaemon();
-  if (existingPid) {
-    if (!replaceExistingFlag) {
-      console.error(
-        `\x1b[31mAborted: daemon already running in this directory (PID ${existingPid})\x1b[0m`,
-      );
-      console.error(`Use --stop first, or kill PID ${existingPid} manually.`);
-      process.exit(1);
-    }
-
+  // Daemon boot path: PID check runs first (inside checkStartupPreconditions);
+  // if `--replace-existing` is set and a daemon is live, we take over the
+  // slot after terminating the incumbent, then re-run the preflight so the
+  // migration step can proceed.
+  let pre = await checkStartupPreconditions();
+  if (pre.status === "daemon-running" && replaceExistingFlag && pre.pid) {
+    const existingPid = pre.pid;
     console.log(`Replacing existing daemon (PID ${existingPid})...`);
     try {
       process.kill(existingPid, "SIGTERM");
@@ -376,6 +421,14 @@ export async function start(args: string[] = []) {
     }
 
     await cleanupPidFile();
+    pre = await checkStartupPreconditions();
+  }
+  if (pre.status !== "ok") {
+    console.error(`\x1b[31mAborted: ${pre.message}\x1b[0m`);
+    if (pre.status === "daemon-running") {
+      console.error(`Use --stop first, or kill PID ${pre.pid} manually.`);
+    }
+    process.exit(preflightExitCode(pre.status));
   }
 
   await initConfig();

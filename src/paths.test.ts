@@ -102,6 +102,7 @@ const CLAUDECLAW_ALLOWLIST: ReadonlySet<string> = new Set([
   "migrate/legacy.ts",
   "state/import-json.ts", // one-shot legacy-JSON importer
   "commands/start.ts", // user-facing migration log messages
+  "commands/start.migration-order.test.ts", // pins migration-order preflight behavior by seeding a legacy dir
   "runner.test.ts", // tests the legacy-marker rewrite behavior in ensureProjectClaudeMd
 ]);
 

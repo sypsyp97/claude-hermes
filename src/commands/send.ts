@@ -61,7 +61,37 @@ export async function send(args: string[]) {
   }
 
   await initConfig();
-  await loadSettings();
+  const settings = await loadSettings();
+
+  // Validate delivery target + allowlist BEFORE burning a Claude turn. A bad
+  // --to or missing token used to consume a Claude invocation (and mutate
+  // session state) only to fail the send afterwards.
+  if (wantsChannel) {
+    if (telegramFlag) {
+      if (!settings.telegram.token) {
+        console.error("Telegram token is not configured in settings.");
+        process.exit(1);
+      }
+      if (!settings.telegram.allowedUserIds.includes(Number(to))) {
+        console.error(
+          `send: --to ${to} is not in telegram.allowedUserIds; add them to settings first.`,
+        );
+        process.exit(1);
+      }
+    }
+    if (discordFlag) {
+      if (!settings.discord.token) {
+        console.error("Discord token is not configured in settings.");
+        process.exit(1);
+      }
+      if (!settings.discord.allowedUserIds.includes(to!)) {
+        console.error(
+          `send: --to ${to} is not in discord.allowedUserIds; add them to settings first.`,
+        );
+        process.exit(1);
+      }
+    }
+  }
 
   const session = await getSession();
   if (!session) {
@@ -77,23 +107,12 @@ export async function send(args: string[]) {
     return;
   }
 
-  const settings = await loadSettings();
   const text = result.exitCode === 0
     ? result.stdout || "(empty)"
     : `error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
 
   if (telegramFlag) {
     const token = settings.telegram.token;
-    if (!token) {
-      console.error("Telegram token is not configured in settings.");
-      process.exit(1);
-    }
-    if (!settings.telegram.allowedUserIds.includes(Number(to))) {
-      console.error(
-        `send: --to ${to} is not in telegram.allowedUserIds; add them to settings first.`,
-      );
-      process.exit(1);
-    }
     const res = await fetch(
       `https://api.telegram.org/bot${token}/sendMessage`,
       {
@@ -111,16 +130,6 @@ export async function send(args: string[]) {
 
   if (discordFlag) {
     const dToken = settings.discord.token;
-    if (!dToken) {
-      console.error("Discord token is not configured in settings.");
-      process.exit(1);
-    }
-    if (!settings.discord.allowedUserIds.includes(to!)) {
-      console.error(
-        `send: --to ${to} is not in discord.allowedUserIds; add them to settings first.`,
-      );
-      process.exit(1);
-    }
     const dmRes = await fetch("https://discord.com/api/v10/users/@me/channels", {
       method: "POST",
       headers: {
