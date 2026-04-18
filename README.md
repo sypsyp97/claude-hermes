@@ -127,9 +127,13 @@ bun test tests/smoke
 bun test tests/integration
 ```
 
+## License
+
+MIT — see [LICENSE](LICENSE).
+
 ## Acknowledgements
 
-Forked from [moazbuilds/claudeclaw](https://github.com/moazbuilds/claudeclaw) — the Telegram and Discord bridges, the voice transcription path, and the original cron/heartbeat scaffolding all come from there.
+Started as a fork of [moazbuilds/claudeclaw](https://github.com/moazbuilds/claudeclaw); the shared-name files that remain (Telegram + Discord bridges, voice transcription, cron/heartbeat scaffolding) have since been rewritten from scratch against the test suite.
 
 The self-evolve cadence (small step, verify-gated, journal-everything) is lifted from [yologdev/yoyo-evolve](https://github.com/yologdev/yoyo-evolve).
 

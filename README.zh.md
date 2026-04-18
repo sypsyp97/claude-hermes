@@ -126,9 +126,13 @@ bun test tests/smoke
 bun test tests/integration
 ```
 
+## License
+
+MIT —— 见 [LICENSE](LICENSE)。
+
 ## 致谢
 
-Fork 自 [moazbuilds/claudeclaw](https://github.com/moazbuilds/claudeclaw) —— Telegram bridge、Discord bridge、语音转写、最早的 cron/heartbeat 骨架都来自这里。
+最初 fork 自 [moazbuilds/claudeclaw](https://github.com/moazbuilds/claudeclaw)；遗留同名文件（Telegram/Discord bridge、语音转写、cron/heartbeat 骨架）已经针对测试从零重写过。
 
 自我进化的节奏（小步走、verify 把关、全程写 journal）借自 [yologdev/yoyo-evolve](https://github.com/yologdev/yoyo-evolve)。
 
