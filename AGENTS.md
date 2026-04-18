@@ -8,7 +8,7 @@ SDK agents) working in this repo. Humans should read README.md instead.
 1. Read `CLAUDE.md` for project identity, persona, and behavioural rules.
 2. Make your changes.
 3. Run `bun run verify` — must exit 0 before you commit.
-4. Commit with a meaningful message; push to a branch or master.
+4. Commit with a meaningful message; push to a branch or main.
 5. CI re-runs verify across (ubuntu, macos) × (bun 1.3.4, latest). All four
    legs must stay green.
 
@@ -46,7 +46,7 @@ the human log.
 ## Hard rules — do not cross these
 
 1. **Never commit a red verify.** Run `bun run verify:fast` before every
-   commit; the evolve loop reverts commits that fail full verify on master.
+   commit; the evolve loop reverts commits that fail full verify on main.
 2. **Never delete `LEGACY_*` constants in `src/paths.ts`.** Old users coming
    from `claudeclaw` rely on the migration path. Tests in
    `src/paths.test.ts` pin this; if you have to change them, talk to a human.
