@@ -13,8 +13,9 @@ import {
 import { type Job, clearJobSchedule, loadJobs } from "../jobs";
 import { executeScheduledJob } from "../scheduler";
 import { migrateIfNeeded } from "../migrate/legacy";
+import { migrateLegacyMemory } from "../memory/files";
 import { checkExistingDaemon, cleanupPidFile, writePidFile } from "../pid";
-import { registerDaemon, unregisterDaemon } from "../runtime/daemon-registry";
+import { migrateGlobalRegistry, registerDaemon, unregisterDaemon } from "../runtime/daemon-registry";
 import {
   bootstrap,
   ensureProjectClaudeMd,
@@ -53,6 +54,39 @@ async function runMigrationIfAny(): Promise<void> {
   } catch (err) {
     console.error(
       `[${new Date().toLocaleTimeString()}] Migration failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // Move memory files from `.claude/hermes/memory/` → `<cwd>/memory/`. The
+  // auto-memory system prompt injected by Claude Code expects project-root
+  // `memory/`, so living under `.claude/hermes/` meant the agent's own memory
+  // was invisible to it. Best-effort: migration failure must not block boot.
+  try {
+    const result = await migrateLegacyMemory();
+    if (result.moved.length > 0) {
+      console.log(
+        `[${new Date().toLocaleTimeString()}] Migrated legacy memory dir → <cwd>/memory/ (${result.moved.length} file(s)${result.skipped.length > 0 ? `, ${result.skipped.length} skipped` : ""}).`,
+      );
+    }
+  } catch (err) {
+    console.error(
+      `[${new Date().toLocaleTimeString()}] Memory migration failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // Move daemon-registry entries from `~/.claude/hermes/daemons.json` →
+  // `<cwd>/.claude/hermes/daemons.json` for this project. Same best-effort
+  // contract as the memory migrator.
+  try {
+    const result = await migrateGlobalRegistry();
+    if (result.migrated > 0) {
+      console.log(
+        `[${new Date().toLocaleTimeString()}] Migrated global daemon registry (${result.migrated} entry/entries for this cwd; ${result.remainingGlobal} remain globally).`,
+      );
+    }
+  } catch (err) {
+    console.error(
+      `[${new Date().toLocaleTimeString()}] Registry migration failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 }

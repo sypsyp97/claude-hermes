@@ -606,6 +606,7 @@ export function cleanChildEnv(env: NodeJS.ProcessEnv): Record<string, string> {
 /** Load and concatenate all prompt files from the prompts/ directory. */
 async function loadPrompts(): Promise<string> {
   const selectedPromptFiles = [
+    join(PROMPTS_DIR, "RULES.md"),
     join(PROMPTS_DIR, "IDENTITY.md"),
     join(PROMPTS_DIR, "USER.md"),
     join(PROMPTS_DIR, "SOUL.md"),

@@ -77,7 +77,12 @@ export function whisperDir(cwd: string = process.cwd()): string {
 }
 
 export function memoryDir(cwd: string = process.cwd()): string {
-  return join(hermesDir(cwd), "memory");
+  return join(cwd, "memory");
+}
+
+/** Legacy memory directory under `.claude/hermes/memory/` — only referenced by the migrator. */
+export function legacyMemoryDir(cwd: string = process.cwd()): string {
+  return join(cwd, ".claude", "hermes", "memory");
 }
 
 export function userMemoryFile(cwd: string = process.cwd()): string {

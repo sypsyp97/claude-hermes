@@ -101,7 +101,7 @@ export async function stop() {
 
   await cleanupPidFile();
   await teardownStatusline();
-  // Drop our entry from the cross-project registry. The daemon's own SIGTERM
+  // Drop our entry from the project-scoped registry. The daemon's own SIGTERM
   // handler does this too, but we strip it here as belt-and-suspenders in
   // case it died without unregistering.
   await unregisterDaemon(pidNum).catch(() => {});
@@ -116,11 +116,13 @@ export async function stop() {
 }
 
 export async function stopAll() {
-  // Source of truth is the cross-project registry (~/.claude/hermes/daemons.json).
-  // We used to scan ~/.claude/projects/ and reverse Claude's slug encoding,
-  // which broke entirely on Windows (path was `/C//...` instead of `C:\...`)
+  // Source of truth is the project-scoped registry
+  // (`<cwd>/.claude/hermes/daemons.json`). We used to keep this registry under
+  // `~/.claude/hermes/daemons.json` and scan `~/.claude/projects/` before that,
+  // but both approaches broke on Windows (path was `/C//...` instead of `C:\...`)
   // and silently lost any project whose folder name contained a hyphen
   // (e.g. `~/projects/my-app` → reconstructed as `~/projects/my/app`).
+  console.log("Stopping hermes daemons for this project...");
   const entries = await listDaemons();
 
   if (entries.length === 0) {
