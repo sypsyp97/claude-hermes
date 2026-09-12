@@ -1,42 +1,21 @@
-// Search skills.sh and return JSON results
-// Usage: node search.mjs <query>
-// Works with Node 18+, Bun, Deno
-
+// Search the structured skills.sh API. Usage: node search.mjs <query>
 const query = process.argv[2];
 if (!query) {
   console.log(JSON.stringify({ error: "No search query provided" }));
   process.exit(1);
 }
-
 try {
-  const res = await fetch(`https://skills.sh/?q=${encodeURIComponent(query)}`);
-  const html = await res.text();
-
-  const skills = [];
-  const esc = `\\\\?"`;  // matches both \" and "
-  const pattern = new RegExp(
-    `\\{${esc}source${esc}:${esc}([^"\\\\]+)${esc},${esc}skillId${esc}:${esc}([^"\\\\]+)${esc},${esc}name${esc}:${esc}([^"\\\\]+)${esc},${esc}installs${esc}:(\\d+)\\}`,
-    "g"
-  );
-  let match;
-  while ((match = pattern.exec(html)) !== null) {
-    skills.push({
-      source: match[1],
-      id: match[2],
-      name: match[3],
-      installs: parseInt(match[4]),
-    });
-  }
-
-  const q = query.toLowerCase();
-  let filtered = skills.filter(
-    (s) => s.name.toLowerCase().includes(q) || s.source.toLowerCase().includes(q)
-  );
-  if (filtered.length === 0) filtered = skills.slice(0, 20);
-
-  filtered.sort((a, b) => b.installs - a.installs);
-  console.log(JSON.stringify(filtered.slice(0, 15), null, 2));
-} catch (e) {
-  console.log(JSON.stringify({ error: e.message }));
+  const response = await fetch(`https://www.skills.sh/api/search?q=${encodeURIComponent(query)}`, { signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error(`skills.sh API returned HTTP ${response.status}`);
+  const data = await response.json();
+  if (!Array.isArray(data.skills)) throw new Error("Invalid skills.sh search response");
+  const skills = data.skills.filter(s => typeof s.source === "string" && typeof s.skillId === "string" && typeof s.name === "string").map(s => ({
+    source: s.source, id: s.skillId, name: s.name,
+    installs: typeof s.installs === "number" && Number.isFinite(s.installs) ? s.installs : 0,
+  }));
+  skills.sort((a, b) => b.installs - a.installs);
+  console.log(JSON.stringify(skills.slice(0, 15), null, 2));
+} catch (error) {
+  console.log(JSON.stringify({ error: error.message }));
   process.exit(1);
 }

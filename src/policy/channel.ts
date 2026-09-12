@@ -22,6 +22,8 @@ export interface ChannelPolicy {
   autoThread: boolean;
   memoryScope: MemoryScope;
   allowedSkills: string[] | "*";
+  /** Additional users authorized only in this guild channel and inheriting threads. */
+  allowedUserIds?: string[];
   modelPolicy?: { model?: string; fallback?: string };
   deliveryRole: "interactive" | "delivery";
 }
@@ -74,6 +76,7 @@ const DELIVERY_DEFAULT: ChannelPolicy = {
 function clonePolicy(p: ChannelPolicy): ChannelPolicy {
   return {
     ...p,
+    allowedUserIds: p.allowedUserIds ? [...p.allowedUserIds] : undefined,
     allowedSkills: p.allowedSkills === "*" ? "*" : [...p.allowedSkills],
     modelPolicy: p.modelPolicy ? { ...p.modelPolicy } : undefined,
   };
@@ -100,6 +103,7 @@ export function isSkillAllowed(policy: Pick<ChannelPolicy, "allowedSkills">, com
 
 export function mergePolicy(base: ChannelPolicy, override: Partial<ChannelPolicy>): ChannelPolicy {
   const merged: ChannelPolicy = { ...base, ...override };
+  if (merged.allowedUserIds) merged.allowedUserIds = [...merged.allowedUserIds];
   // Make sure overrides also produce an independent copy of any array/object.
   if (override.allowedSkills !== undefined) {
     merged.allowedSkills = override.allowedSkills === "*" ? "*" : [...override.allowedSkills];
@@ -112,4 +116,16 @@ export function mergePolicy(base: ChannelPolicy, override: Partial<ChannelPolicy
     merged.modelPolicy = { ...base.modelPolicy };
   }
   return merged;
+}
+
+export function isChannelAuthorized(
+  userId: string,
+  globalUsers: string[],
+  isGuild: boolean,
+  policy: Pick<ChannelPolicy, "allowedUserIds">
+): boolean {
+  return (
+    globalUsers.includes(userId) ||
+    (isGuild && Array.isArray(policy.allowedUserIds) && policy.allowedUserIds.includes(userId))
+  );
 }

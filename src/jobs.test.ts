@@ -141,3 +141,21 @@ describe("clearJobSchedule", () => {
     expect(jobs).toHaveLength(0);
   });
 });
+
+test("job notification targets preserve Discord IDs and Telegram topics", async () => {
+  await writeFile(
+    join(JOBS_DIR, "target.md"),
+    `---\nschedule: "0 9 * * *"\nnotifyChannel: "123456789012345678"\nnotifyTelegramChat: "-100123"\nnotifyTelegramTopic: 42\n---\nReport`
+  );
+  const [job] = await loadJobs();
+  expect(job.notifyChannel).toBe("123456789012345678");
+  expect(job.notifyTelegramChat).toBe(-100123);
+  expect(job.notifyTelegramTopic).toBe(42);
+});
+test("invalid explicit notification target rejects a job instead of broadcasting", async () => {
+  await writeFile(
+    join(JOBS_DIR, "bad-target.md"),
+    `---\nschedule: "0 9 * * *"\nnotifyTelegramTopic: 42\n---\nReport`
+  );
+  expect(await loadJobs()).toEqual([]);
+});

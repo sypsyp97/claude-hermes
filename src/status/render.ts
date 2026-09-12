@@ -43,11 +43,12 @@ export interface Renderer {
   toolCount(): number;
 }
 
-export function createRenderer(taskLabel: string, startedAt?: number): Renderer {
+export function createRenderer(taskLabel: string, startedAt?: number, options: {preview?: boolean; verbose?: boolean} = {}): Renderer {
   const start = startedAt ?? Date.now();
   const tools: ToolEntry[] = [];
   let totalTools = 0;
   let replyChars = 0;
+  let preview = "";
 
   function apply(event: StatusEvent): void {
     if (event.kind === "tool_use_start") {
@@ -61,6 +62,7 @@ export function createRenderer(taskLabel: string, startedAt?: number): Renderer 
       }
     } else if (event.kind === "text_delta") {
       replyChars += event.text.length;
+      if (options.preview) preview = (preview + event.text).slice(-16000);
     }
   }
 
@@ -74,6 +76,11 @@ export function createRenderer(taskLabel: string, startedAt?: number): Renderer 
     if (replyChars > 0) {
       lines.push(`✍️ Writing reply… (${replyChars} chars)`);
     }
+    if (options.preview && preview) {
+      const visibleText = preview.replace(/\[(?:send-file|react):[^\]]*(?:\]|$)/gi, "").trim();
+      if (visibleText) lines.push(Array.from(visibleText).slice(-800).join(""));
+    }
+    if (options.verbose === false) return lines.join("\n");
     const hiddenCount = Math.max(0, tools.length - MAX_VISIBLE_TOOLS);
     if (hiddenCount > 0) {
       lines.push(`… +${hiddenCount} earlier tool${hiddenCount === 1 ? "" : "s"}`);

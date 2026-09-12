@@ -66,13 +66,40 @@ export function retryAfterMs(seconds: unknown): number | undefined {
     : undefined;
 }
 
-export function downloadBytes(url: string, options: RequestOptions = {}): Promise<Uint8Array> {
+export function downloadBytes(
+  url: string,
+  options: RequestOptions & { maxBytes?: number } = {}
+): Promise<Uint8Array> {
   return requestWithTimeout(
     url,
     {},
     async (response) => {
       if (!response.ok) throw new Error(`Attachment download failed: ${response.status}`);
-      return new Uint8Array(await response.arrayBuffer());
+      const limit = options.maxBytes ?? 20 * 1024 * 1024;
+      const reader = response.body?.getReader();
+      if (!reader) return new Uint8Array();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      try {
+        if (Number(response.headers.get("content-length")) > limit)
+          throw new Error("Attachment exceeds download size limit");
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.length;
+          if (size > limit) throw new Error("Attachment exceeds download size limit");
+          chunks.push(value);
+        }
+      } finally {
+        await reader.cancel().catch(() => {});
+      }
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return bytes;
     },
     { timeoutMs: 60_000, ...options }
   );

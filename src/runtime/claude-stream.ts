@@ -52,7 +52,28 @@ const DEFAULT_KILL_ESCALATION_MS = 5000;
 
 export async function runClaudeStreaming(opts: StreamingOptions): Promise<StreamingResult> {
   const signal = opts.signal ?? bridgeSignal();
-  return withExecutionSlot(() => stream({ ...opts, signal }), signal);
+  return withExecutionSlot(async () => {
+    const started = Date.now();
+    try {
+      return await stream({ ...opts, signal });
+    } catch (error) {
+      const stderr = signal?.aborted ? "Claude session cancelled" : String(error);
+      // Once admitted, an abort or synchronous spawn failure must finish an
+      // opened sink, including its heartbeat, even if no child was created.
+      try {
+        await opts.sink.close({ ok: false, errorShort: stderr });
+      } catch {
+        /* best-effort status */
+      }
+      return {
+        ok: false,
+        exitCode: signal?.aborted ? 130 : -1,
+        stdout: "",
+        stderr,
+        durationMs: Date.now() - started,
+      };
+    }
+  }, signal);
 }
 
 async function stream(opts: StreamingOptions): Promise<StreamingResult> {

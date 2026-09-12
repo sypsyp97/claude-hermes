@@ -1,3 +1,5 @@
+import { withActiveConversation, conversationPreference } from "./runtime/conversation-controls";
+import { artifactDirectory } from "./runtime/artifacts";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import { existsSync } from "fs";
@@ -542,7 +544,7 @@ export async function deleteThreadSession(source: ThreadSource, threadId: string
 }
 
 export function compactCurrentSession(opts?: { sink?: StatusSink; target?: SessionInput; source?: ThreadSource }): Promise<{ success: boolean; message: string }> {
-  return enqueue(() => compactSession(opts), opts?.target, opts?.source);
+  return enqueue(() => withActiveConversation(sessionAccess(opts?.target, opts?.source).target, () => compactSession(opts)), opts?.target, opts?.source);
 }
 
 async function compactSession(
@@ -568,7 +570,7 @@ async function compactSession(
 
   const ok = await runCompact(
     existing.sessionId,
-    session.target.policy?.modelPolicy?.model ?? settings.model,
+    (await conversationPreference(session.target)).model ?? session.target.policy?.modelPolicy?.model ?? settings.model,
     settings.api,
     baseEnv,
     [...securityArgs, ...(session.scoped ? claudeSessionArgs(session.target) : [])],
@@ -636,6 +638,9 @@ async function execClaude(
   if (session.target.policy?.modelPolicy?.model !== undefined) {
     primaryConfig = {model:session.target.policy.modelPolicy.model, api};
   }
+
+  const preference = await conversationPreference(session.target);
+  if (preference.model !== undefined) primaryConfig = { model: preference.model, api };
 
   const fallbackConfig: ModelConfig = {
     model: session.target.policy?.modelPolicy?.fallback ?? fallback?.model ?? "",
@@ -732,6 +737,11 @@ async function execClaude(
     console.error(`[${new Date().toLocaleTimeString()}] Failed to compose runtime memory layer:`, e);
   }
 
+  if (["telegram", "discord"].includes(session.target.source)) {
+    const outbox = artifactDirectory(session.target.workspace, session.target.key);
+    await mkdir(outbox, { recursive: true });
+    appendParts.push(`To send a file to the user, write it inside ${outbox} and include [send-file:/absolute/path] in your final answer. Each file must be under 10 MiB. Only this conversation's outbox is eligible for upload.`);
+  }
   if (security.level !== "unrestricted") appendParts.push(dirScopePrompt());
   if (appendParts.length > 0) {
     args.push("--append-system-prompt", appendParts.join("\n\n"));
@@ -908,7 +918,7 @@ export async function run(
   sink?: StatusSink,
   source: ThreadSource = "cli",
 ): Promise<RunResult> {
-  return enqueue(() => execClaude(name, prompt, threadId, sink, source), threadId, source);
+  return enqueue(() => withActiveConversation(sessionAccess(threadId, source).target, () => execClaude(name, prompt, threadId, sink, source)), threadId, source);
 }
 
 function prefixUserMessageWithClock(prompt: string): string {
@@ -931,7 +941,7 @@ export async function runUserMessage(
 ): Promise<RunResult> {
   const text = typeof prompt === "string" ? prompt : prompt.text;
   const context = typeof prompt === "string" ? prompt : prompt.context;
-  return enqueue(() => execClaude(name, prefixUserMessageWithClock(context), threadId, sink, source, text), threadId, source);
+  return enqueue(() => withActiveConversation(sessionAccess(threadId, source).target, () => execClaude(name, prefixUserMessageWithClock(context), threadId, sink, source, text)), threadId, source);
 }
 
 /**

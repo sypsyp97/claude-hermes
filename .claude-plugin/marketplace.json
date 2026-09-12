@@ -8,7 +8,7 @@
       "name": "claude-hermes",
       "source": "./",
       "description": "Self-evolving Claude Code daemon — Telegram + Discord bridges, cron jobs, learned skills, SQLite state",
-      "version": "1.0.3",
+      "version": "1.1.0",
       "keywords": [
         "daemon",
         "telegram",
