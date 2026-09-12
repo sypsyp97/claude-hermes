@@ -1,5 +1,5 @@
 import { formatContextUsage } from "../runtime/context-usage";
-import { enqueueBridge } from "../runtime/bridge-queue";
+import { enqueueBridge, prepareBridgeTransfer } from "../runtime/bridge-queue";
 import { withBridgeSignal } from "../runtime/bridge-context";
 import { downloadBytes } from "../runtime/http";
 import { ensureProjectClaudeMd, run, runUserMessage, compactCurrentSession, resetCurrentSession, forgetCurrentSession } from "../runner";
@@ -587,7 +587,10 @@ async function processMyChatMember(update: TelegramMyChatMemberUpdate): Promise<
 
 // --- Message handler ---
 
+const pendingForumCreations = new Map<number, (channel: string) => Promise<void>>();
+
 export async function handleMessage(message: TelegramMessage): Promise<void> {
+  if (message.message_thread_id !== undefined) pendingForumCreations.get(message.chat.id)?.(`${message.chat.id}:${message.message_thread_id}`);
   return enqueueBridge("telegram", `${message.chat.id}:${message.message_thread_id ?? "main"}`, () => processMessage(message));
 }
 
@@ -741,143 +744,158 @@ async function processMessage(message: TelegramMessage): Promise<void> {
   const typingInterval = setInterval(() => sendTyping(config.token, chatId, threadId), 4000);
 
   try {
+    const reply = async () => {
+      await sendTyping(config.token, chatId, threadId);
+      let imagePath: string | null = null;
+      let voicePath: string | null = null;
+      let voiceTranscript: string | null = null;
+      if (hasImage) {
+        try {
+          imagePath = await downloadImageFromMessage(config.token, message);
+        } catch (err) {
+          console.error(`[Telegram] Failed to download image for ${label}: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+      if (hasVoice) {
+        try {
+          voicePath = await downloadVoiceFromMessage(config.token, message);
+        } catch (err) {
+          console.error(`[Telegram] Failed to download voice for ${label}: ${err instanceof Error ? err.message : err}`);
+        }
+
+        if (voicePath) {
+          try {
+            debugLog(`Voice file saved: path=${voicePath}`);
+            voiceTranscript = await transcribeAudioToText(voicePath, {
+              debug: telegramDebug,
+              log: (message) => debugLog(message),
+            });
+          } catch (err) {
+            console.error(`[Telegram] Failed to transcribe voice for ${label}: ${err instanceof Error ? err.message : err}`);
+          }
+        }
+      }
+
+      // Skill routing: resolve slash commands to SKILL.md prompts
+      let skillContext: string | null = null;
+      if (command && command !== "/start" && command !== "/reset" && command !== "/compact" && command !== "/status" && command !== "/context") {
+        try {
+          skillContext = await resolveSkillPrompt(command);
+          if (skillContext) {
+            debugLog(`Skill resolved for ${command}: ${skillContext.length} chars`);
+          }
+        } catch (err) {
+          debugLog(`Skill resolution failed for ${command}: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+
+      let documentInfo: { localPath: string; originalName: string } | null = null;
+      if (hasDocument) {
+        try {
+          documentInfo = await downloadDocumentFromMessage(config.token, message);
+        } catch (err) {
+          console.error(
+            `[Telegram] Failed to download document for ${label}: ${err instanceof Error ? err.message : err}`
+          );
+        }
+      }
+
+      const promptParts = [`[Telegram from ${label}]`];
+      if (threadId) promptParts.push(`[thread:${threadId}]`);
+      if (skillContext) {
+        // Strip the slash command from the message text and pass remaining args
+        const args = text.trim().slice(command!.length).trim();
+        promptParts.push(`<command-name>${command}</command-name>`);
+        promptParts.push(skillContext);
+        if (args) promptParts.push(`User arguments: ${args}`);
+      } else if (text.trim()) {
+        promptParts.push(`Message: ${text}`);
+      }
+      if (imagePath) {
+        promptParts.push(`Image path: ${imagePath}`);
+        promptParts.push("The user attached an image. Inspect this image file directly before answering.");
+      } else if (hasImage) {
+        promptParts.push("The user attached an image, but downloading it failed. Respond and ask them to resend.");
+      }
+      if (voiceTranscript) {
+        promptParts.push(`Voice transcript: ${voiceTranscript}`);
+        promptParts.push("The user attached voice audio. Use the transcript as their spoken message.");
+      } else if (hasVoice) {
+        promptParts.push(
+          "The user attached voice audio, but it could not be transcribed. Respond and ask them to resend a clearer clip."
+        );
+      }
+      if (documentInfo) {
+        promptParts.push(`Document path: ${documentInfo.localPath}`);
+        promptParts.push(`Original filename: ${documentInfo.originalName}`);
+        promptParts.push(
+          "The user attached a document. Read and process this file directly."
+        );
+      } else if (hasDocument) {
+        promptParts.push(
+          "The user attached a document, but downloading it failed. Respond and ask them to resend."
+        );
+      }
+      const prefixedPrompt = promptParts.join("\n");
+      const statusSink = createTelegramStatusSink({
+        transport: telegramStatusTransport(config.token),
+        chatId,
+        ...(threadId !== undefined && { threadId }),
+      });
+      const threadArg = target;
+      const result = await runUserMessage("telegram", {text: text || voiceTranscript || "", context: prefixedPrompt}, threadArg, statusSink, "telegram");
+
+      if (result.exitCode !== 0) {
+        await sendMessage(config.token, chatId, `Error (exit ${result.exitCode}): ${result.stderr || "Unknown error"}`, threadId);
+      } else {
+        const visibleText = extractSessionAndResultFromText(result.stdout || "").result ?? result.stdout ?? "";
+        const { cleanedText: afterReact, reactionEmoji } = extractReactionDirective(visibleText);
+        const { cleanedText, filePaths } = extractSendFileDirectives(afterReact);
+        if (reactionEmoji) {
+          await sendReaction(config.token, chatId, message.message_id, reactionEmoji).catch((err) => {
+            console.error(`[Telegram] Failed to send reaction for ${label}: ${err instanceof Error ? err.message : err}`);
+          });
+        }
+        if (cleanedText) {
+          await sendMessage(config.token, chatId, cleanedText, threadId);
+        }
+        for (const fp of filePaths) {
+          try {
+            await sendDocumentToChat(config.token, chatId, fp, threadId);
+          } catch (err) {
+            console.error(`[Telegram] Failed to send document for ${label}: ${err instanceof Error ? err.message : err}`);
+            await sendMessage(config.token, chatId, `Failed to send file: ${fp.split("/").pop()}`, threadId);
+          }
+        }
+        if (!cleanedText && filePaths.length === 0) {
+          await sendMessage(config.token, chatId, "(empty response)", threadId);
+        }
+      }
+    };
     if (isGroup && policy.autoThread && threadId === undefined) {
       if (!message.chat.is_forum) {
         await sendMessage(config.token, chatId, "autoThread requires a Telegram forum supergroup. Enable topics or disable autoThread for this chat.");
         return;
       }
-      const topic = await callApi<{result:{message_thread_id:number}}>(config.token, "createForumTopic", {
-        chat_id: chatId, name: (text.trim() || `${label}'s conversation`).slice(0,100),
+      const transfer = prepareBridgeTransfer<number>("telegram", async topicId => {
+        threadId = topicId;
+        target = telegramSessionTarget({workspace:process.cwd(),chatId,userId,topicId,isDm:false},resolveTelegramPolicy(await getSharedDb(),chatId,false,topicId));
+        await reply();
       });
-      threadId = topic.result.message_thread_id;
-      target = telegramSessionTarget({workspace:process.cwd(),chatId,userId,topicId:threadId,isDm:false},resolveTelegramPolicy(await getSharedDb(),chatId,false,threadId));
-    }
-    await sendTyping(config.token, chatId, threadId);
-    let imagePath: string | null = null;
-    let voicePath: string | null = null;
-    let voiceTranscript: string | null = null;
-    if (hasImage) {
+      pendingForumCreations.set(chatId, transfer.reserve);
       try {
-        imagePath = await downloadImageFromMessage(config.token, message);
-      } catch (err) {
-        console.error(`[Telegram] Failed to download image for ${label}: ${err instanceof Error ? err.message : err}`);
-      }
-    }
-    if (hasVoice) {
-      try {
-        voicePath = await downloadVoiceFromMessage(config.token, message);
-      } catch (err) {
-        console.error(`[Telegram] Failed to download voice for ${label}: ${err instanceof Error ? err.message : err}`);
-      }
-
-      if (voicePath) {
-        try {
-          debugLog(`Voice file saved: path=${voicePath}`);
-          voiceTranscript = await transcribeAudioToText(voicePath, {
-            debug: telegramDebug,
-            log: (message) => debugLog(message),
-          });
-        } catch (err) {
-          console.error(`[Telegram] Failed to transcribe voice for ${label}: ${err instanceof Error ? err.message : err}`);
-        }
-      }
-    }
-
-    // Skill routing: resolve slash commands to SKILL.md prompts
-    let skillContext: string | null = null;
-    if (command && command !== "/start" && command !== "/reset" && command !== "/compact" && command !== "/status" && command !== "/context") {
-      try {
-        skillContext = await resolveSkillPrompt(command);
-        if (skillContext) {
-          debugLog(`Skill resolved for ${command}: ${skillContext.length} chars`);
-        }
-      } catch (err) {
-        debugLog(`Skill resolution failed for ${command}: ${err instanceof Error ? err.message : err}`);
-      }
-    }
-
-    let documentInfo: { localPath: string; originalName: string } | null = null;
-    if (hasDocument) {
-      try {
-        documentInfo = await downloadDocumentFromMessage(config.token, message);
-      } catch (err) {
-        console.error(
-          `[Telegram] Failed to download document for ${label}: ${err instanceof Error ? err.message : err}`
-        );
-      }
-    }
-
-    const promptParts = [`[Telegram from ${label}]`];
-    if (threadId) promptParts.push(`[thread:${threadId}]`);
-    if (skillContext) {
-      // Strip the slash command from the message text and pass remaining args
-      const args = text.trim().slice(command!.length).trim();
-      promptParts.push(`<command-name>${command}</command-name>`);
-      promptParts.push(skillContext);
-      if (args) promptParts.push(`User arguments: ${args}`);
-    } else if (text.trim()) {
-      promptParts.push(`Message: ${text}`);
-    }
-    if (imagePath) {
-      promptParts.push(`Image path: ${imagePath}`);
-      promptParts.push("The user attached an image. Inspect this image file directly before answering.");
-    } else if (hasImage) {
-      promptParts.push("The user attached an image, but downloading it failed. Respond and ask them to resend.");
-    }
-    if (voiceTranscript) {
-      promptParts.push(`Voice transcript: ${voiceTranscript}`);
-      promptParts.push("The user attached voice audio. Use the transcript as their spoken message.");
-    } else if (hasVoice) {
-      promptParts.push(
-        "The user attached voice audio, but it could not be transcribed. Respond and ask them to resend a clearer clip."
-      );
-    }
-    if (documentInfo) {
-      promptParts.push(`Document path: ${documentInfo.localPath}`);
-      promptParts.push(`Original filename: ${documentInfo.originalName}`);
-      promptParts.push(
-        "The user attached a document. Read and process this file directly."
-      );
-    } else if (hasDocument) {
-      promptParts.push(
-        "The user attached a document, but downloading it failed. Respond and ask them to resend."
-      );
-    }
-    const prefixedPrompt = promptParts.join("\n");
-    const statusSink = createTelegramStatusSink({
-      transport: telegramStatusTransport(config.token),
-      chatId,
-      ...(threadId !== undefined && { threadId }),
-    });
-    const threadArg = target;
-    const result = await runUserMessage("telegram", {text: text || voiceTranscript || "", context: prefixedPrompt}, threadArg, statusSink, "telegram");
-
-    if (result.exitCode !== 0) {
-      await sendMessage(config.token, chatId, `Error (exit ${result.exitCode}): ${result.stderr || "Unknown error"}`, threadId);
-    } else {
-      const visibleText = extractSessionAndResultFromText(result.stdout || "").result ?? result.stdout ?? "";
-      const { cleanedText: afterReact, reactionEmoji } = extractReactionDirective(visibleText);
-      const { cleanedText, filePaths } = extractSendFileDirectives(afterReact);
-      if (reactionEmoji) {
-        await sendReaction(config.token, chatId, message.message_id, reactionEmoji).catch((err) => {
-          console.error(`[Telegram] Failed to send reaction for ${label}: ${err instanceof Error ? err.message : err}`);
+        const topic = await callApi<{result:{message_thread_id:number}}>(config.token, "createForumTopic", {
+          chat_id: chatId, name: (text.trim() || `${label}'s conversation`).slice(0,100),
         });
+        await transfer.complete(`${chatId}:${topic.result.message_thread_id}`, topic.result.message_thread_id);
+      } finally {
+        transfer.cancel();
+        pendingForumCreations.delete(chatId);
       }
-      if (cleanedText) {
-        await sendMessage(config.token, chatId, cleanedText, threadId);
-      }
-      for (const fp of filePaths) {
-        try {
-          await sendDocumentToChat(config.token, chatId, fp, threadId);
-        } catch (err) {
-          console.error(`[Telegram] Failed to send document for ${label}: ${err instanceof Error ? err.message : err}`);
-          await sendMessage(config.token, chatId, `Failed to send file: ${fp.split("/").pop()}`, threadId);
-        }
-      }
-      if (!cleanedText && filePaths.length === 0) {
-        await sendMessage(config.token, chatId, "(empty response)", threadId);
-      }
+    } else {
+      await reply();
     }
+
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error(`[Telegram] Error for ${label}: ${errMsg}`);

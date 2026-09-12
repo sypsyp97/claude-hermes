@@ -85,6 +85,125 @@ test("recall uses human text before clock, bridge and skill context consume quer
   expect(result.stdout).toContain("8123");
 });
 
+test.each(["creation", "attachment"] as const)(
+  "Telegram topic forget cannot overtake first-turn %s",
+  async (phase) => {
+    const db = await getSharedDb();
+    upsertPolicy(db, { source: "telegram", channel: "-60" }, { mode: "listen", autoThread: true });
+    let started!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((r) => {
+      started = r;
+    });
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    globalThis.fetch = (async (url: unknown) => {
+      if (String(url).endsWith("/createForumTopic")) {
+        if (phase === "creation") {
+          started();
+          await gate;
+        }
+        return Response.json({ ok: true, result: { message_thread_id: 81 } });
+      }
+      if (String(url).endsWith("/getFile")) {
+        if (phase === "attachment") {
+          started();
+          await gate;
+        }
+        return Response.json({ ok: true, result: { file_path: "image.jpg" } });
+      }
+      if (String(url).includes("/file/bot")) return new Response(new Uint8Array([1, 2, 3]));
+      return Response.json({ ok: true, result: { message_id: 1 } });
+    }) as typeof fetch;
+    const base = {
+      message_id: 1,
+      from: { id: 1, first_name: "Alice" },
+      chat: { id: -60, type: "supergroup", is_forum: true },
+    };
+    const first = handleTelegramMessage({
+      ...base,
+      text: "remember that TOP_SECRET is 8123",
+      photo: [{ file_id: "image", width: 1, height: 1 }],
+    });
+    await ready;
+    const forget = handleTelegramMessage({ ...base, message_id: 2, message_thread_id: 81, text: "/forget" });
+    await Promise.race([forget, Bun.sleep(50)]);
+    release();
+    await Promise.all([first, forget]);
+    expect(getByKey(db, "thread:telegram:-60:81")).toBeNull();
+    expect(db.query("SELECT * FROM memory_entries").all()).toEqual([]);
+  }
+);
+
+test.each(["message", "skill"] as const)(
+  "Discord autoThread %s reserves its lane before the REST response",
+  async (kind) => {
+    const db = await getSharedDb();
+    upsertPolicy(
+      db,
+      { source: "discord", guild: "g", channel: "parent" },
+      { mode: "listen", autoThread: true }
+    );
+    await mkdir(join(cwd, ".claude/skills/report"), { recursive: true });
+    await writeFile(join(cwd, ".claude/skills/report/SKILL.md"), "Generate a report.");
+    let started!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((r) => {
+      started = r;
+    });
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      if (String(url).endsWith("/threads")) {
+        handleDispatch("fake", "THREAD_CREATE", { id: "m", type: 11, parent_id: "parent", guild_id: "g" });
+        started();
+        await gate;
+        return Response.json({ id: "m", name: "work" });
+      }
+      if (init?.method === "GET") return Response.json({ name: "work", type: 0 });
+      return Response.json({ id: "sent" });
+    }) as typeof fetch;
+    const user = { id: "a", username: "Alice", discriminator: "0" };
+    const interaction = {
+      id: "skill",
+      type: 2,
+      application_id: "app",
+      token: "fake",
+      channel_id: "parent",
+      guild_id: "g",
+      member: { user },
+      data: { name: "report" },
+    };
+    const first =
+      kind === "message"
+        ? handleMessageCreate("fake", {
+            id: "m",
+            author: user,
+            channel_id: "parent",
+            guild_id: "g",
+            content: "remember that TOP_SECRET is 8123",
+            attachments: [],
+            mentions: [],
+            type: 0,
+          })
+        : handleInteractionCreate("fake", interaction);
+    await ready;
+    const forget = handleInteractionCreate("fake", {
+      ...interaction,
+      id: "forget",
+      channel_id: "m",
+      data: { name: "forget" },
+    });
+    await Promise.race([forget, Bun.sleep(50)]);
+    release();
+    await Promise.all([first, forget]);
+    expect(getByKey(db, "thread:discord:m")).toBeNull();
+    expect(db.query("SELECT * FROM memory_entries").all()).toEqual([]);
+  }
+);
+
 test.each(["message", "skill"] as const)(
   "autoThread %s cannot recreate a thread deleted before its creation response",
   async (kind) => {
@@ -108,7 +227,6 @@ test.each(["message", "skill"] as const)(
           guild_id: "g",
         });
         handleDispatch("fake", "THREAD_DELETE", { id: "deleted-auto" });
-        await enqueueBridge("discord", "deleted-auto", async () => {});
         return Response.json({ id: "deleted-auto", name: "work" });
       }
       if (init?.method === "GET") return Response.json({ name: "work", type: 0 });
@@ -137,6 +255,7 @@ test.each(["message", "skill"] as const)(
         member: { user: author },
         data: { name: "report" },
       });
+    await enqueueBridge("discord", "deleted-auto", async () => {});
     expect(getByKey(db, "thread:discord:deleted-auto")).toBeNull();
     expect(db.query("SELECT * FROM memory_entries").all()).toEqual([]);
   }

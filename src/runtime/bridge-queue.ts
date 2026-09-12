@@ -1,5 +1,5 @@
 import { canonicalWorkspace } from "../paths";
-import { bridgeSignal } from "./bridge-context";
+import { bridgeSignal, withBridgeSignal } from "./bridge-context";
 
 const lanes = new Map<string, Promise<unknown>>();
 
@@ -19,4 +19,38 @@ export function enqueueBridge<T>(source: string, channel: string, work: () => Pr
     if (lanes.get(key) === tail) lanes.delete(key);
   });
   return task;
+}
+
+/** Reserve newly observed destinations while their creation response is in flight. */
+export function prepareBridgeTransfer<T>(source: string, work: (value: T) => Promise<void>) {
+  const signal = bridgeSignal();
+  let resolve!: (destination: { channel: string; value: T } | null) => void;
+  const ready = new Promise<{ channel: string; value: T } | null>((r) => {
+    resolve = r;
+  });
+  const reservations = new Map<string, Promise<void>>();
+  const reserve = (channel: string): Promise<void> => {
+    const existing = reservations.get(channel);
+    if (existing) return existing;
+    const admit = () =>
+      enqueueBridge(source, channel, async () => {
+        const destination = await ready;
+        if (destination?.channel === channel) await work(destination.value);
+      });
+    const task = signal ? withBridgeSignal(signal, admit) : admit();
+    void task.catch(() => {}); // The selected destination is observed by complete().
+    reservations.set(channel, task);
+    return task;
+  };
+  return {
+    reserve,
+    complete(channel: string, value: T): Promise<void> {
+      const task = reserve(channel);
+      resolve({ channel, value });
+      return task;
+    },
+    cancel(): void {
+      resolve(null);
+    },
+  };
 }

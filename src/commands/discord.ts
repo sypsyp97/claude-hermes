@@ -1,5 +1,5 @@
 import { formatContextUsage } from "../runtime/context-usage";
-import { enqueueBridge } from "../runtime/bridge-queue";
+import { enqueueBridge, prepareBridgeTransfer } from "../runtime/bridge-queue";
 import { withBridgeSignal } from "../runtime/bridge-context";
 import { downloadBytes } from "../runtime/http";
 import { ensureProjectClaudeMd, runUserMessage, compactCurrentSession, resetCurrentSession, deleteThreadSession, forgetCurrentSession } from "../runner";
@@ -98,7 +98,7 @@ let readyGuildIds: Set<string> | null = null;
 // Track known thread channel IDs and their parent channel IDs for multi-session support
 const channels = new Map<string, { name?: string; type?: number; parent_id?: string; guild_id?: string }>();
 // Tombstones exist only while a thread creation/first reply is in flight.
-const pendingThreadCreations = new Set<Set<string>>();
+const pendingThreadCreations = new Set<{ parent: string; deleted: Set<string>; reserve(id: string): Promise<void> }>();
 const knownThreads = new Map<string, { parentId: string }>();
 
 // --- Debug ---
@@ -249,26 +249,32 @@ async function withAutoThread(
   messageId?: string,
 ): Promise<void> {
   const deleted = new Set<string>();
-  pendingThreadCreations.add(deleted);
-  try {
-    const endpoint = messageId ? `/channels/${channelId}/messages/${messageId}/threads` : `/channels/${channelId}/threads`;
-    const thread = await discordApi<{id:string;name?:string}>(token, "POST", endpoint, {
-      name: label.trim().slice(0,100) || "Conversation", auto_archive_duration:1440,
-      ...(messageId ? {} : {type:11}),
-    });
+  const transfer = prepareBridgeTransfer<{id:string;name?:string}>("discord", async thread => {
     const assertPresent = () => {
       if (deleted.has(thread.id)) throw new Error("Thread was deleted before its first request could run.");
     };
     assertPresent();
     knownThreads.set(thread.id,{parentId:channelId});
     channels.set(thread.id,{...thread,type:11,parent_id:channelId,guild_id:guildId});
-    await enqueueBridge("discord", thread.id, async () => {
-      const conversation = await resolveConversation(thread.id,userId,guildId);
-      assertPresent();
-      await work(conversation);
+    const conversation = await resolveConversation(thread.id,userId,guildId);
+    assertPresent();
+    await work(conversation);
+  });
+  const pending = { parent: channelId, deleted, reserve: transfer.reserve };
+  pendingThreadCreations.add(pending);
+  // Message-attached Discord threads use the message ID. Standalone creations
+  // reserve their lane when THREAD_CREATE arrives, before subsequent controls.
+  if (messageId) transfer.reserve(messageId);
+  try {
+    const endpoint = messageId ? `/channels/${channelId}/messages/${messageId}/threads` : `/channels/${channelId}/threads`;
+    const thread = await discordApi<{id:string;name?:string}>(token, "POST", endpoint, {
+      name: label.trim().slice(0,100) || "Conversation", auto_archive_duration:1440,
+      ...(messageId ? {} : {type:11}),
     });
+    await transfer.complete(thread.id, thread);
   } finally {
-    pendingThreadCreations.delete(deleted);
+    transfer.cancel();
+    pendingThreadCreations.delete(pending);
   }
 }
 
@@ -934,6 +940,9 @@ export function handleDispatch(token: string, eventName: string, data: any): voi
       break;
 
     case "THREAD_CREATE":
+      if (data.id && data.parent_id) for (const pending of pendingThreadCreations) {
+        if (pending.parent === data.parent_id) pending.reserve(data.id);
+      }
       if (data.id) channels.set(data.id, data);
       if (data.id && data.parent_id) {
         knownThreads.set(data.id, { parentId: data.parent_id });
@@ -942,7 +951,7 @@ export function handleDispatch(token: string, eventName: string, data: any): voi
       break;
 
     case "THREAD_DELETE":
-      if (data.id) for (const deleted of pendingThreadCreations) deleted.add(data.id);
+      if (data.id) for (const pending of pendingThreadCreations) pending.deleted.add(data.id);
       if (data.id) channels.delete(data.id);
       if (data.id) {
         knownThreads.delete(data.id);
