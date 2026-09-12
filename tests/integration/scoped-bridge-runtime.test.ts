@@ -270,67 +270,104 @@ test.each(["message", "skill"] as const)(
   }
 );
 
-test("Discord per-user forget in another channel waits for shared-session attachment preparation", async () => {
-  const db = await getSharedDb();
-  for (const channel of ["first", "second"])
-    upsertPolicy(
-      db,
-      { source: "discord", guild: "g", channel },
-      { mode: "listen", sessionScope: "per-user" }
-    );
-  let started!: () => void;
-  let release!: () => void;
-  const ready = new Promise<void>((r) => {
-    started = r;
-  });
-  const gate = new Promise<void>((r) => {
-    release = r;
-  });
-  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
-    if (String(url) === "https://file.test/image.png") {
-      started();
-      await gate;
-      return new Response(new Uint8Array([1, 2, 3]));
+test.each(["lookup", "attachment", "other-user"] as const)(
+  "Discord per-user controls respect session ownership during %s preparation",
+  async (phase) => {
+    const db = await getSharedDb();
+    for (const channel of ["first", "second"])
+      upsertPolicy(
+        db,
+        { source: "discord", guild: "g", channel },
+        { mode: "listen", sessionScope: "per-user" }
+      );
+    let started!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((r) => {
+      started = r;
+    });
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      if (String(url) === "https://file.test/image.png") {
+        if (phase !== "lookup") {
+          started();
+          await gate;
+        }
+        return new Response(new Uint8Array([1, 2, 3]));
+      }
+      if (init?.method === "GET") {
+        if (phase === "lookup" && String(url).endsWith("/channels/first")) {
+          started();
+          await gate;
+        }
+        return Response.json({ name: "work", type: 0 });
+      }
+      return Response.json({ id: "sent" });
+    }) as typeof fetch;
+    const user = { id: "a", username: "Alice", discriminator: "0" };
+    const first = handleMessageCreate("fake", {
+      id: "m",
+      channel_id: "first",
+      guild_id: "g",
+      author: user,
+      content: "remember that Orion uses port 8123",
+      attachments: [
+        {
+          id: "image",
+          filename: "image.png",
+          url: "https://file.test/image.png",
+          proxy_url: "https://file.test/image.png",
+          size: 3,
+          content_type: "image/png",
+        },
+      ],
+      mentions: [],
+      type: 0,
+    });
+    await ready;
+    const forget = handleInteractionCreate("fake", {
+      id: "forget",
+      type: 2,
+      application_id: "app",
+      token: "fake",
+      channel_id: "second",
+      guild_id: "g",
+      member: { user: phase === "other-user" ? { ...user, id: "b" } : user },
+      data: { name: "forget" },
+    });
+    const completed = await Promise.race([
+      forget.then(() => true),
+      Bun.sleep(phase === "other-user" ? 1500 : 50).then(() => false),
+    ]);
+    release();
+    await Promise.all([first, forget]);
+    if (phase === "other-user") {
+      expect(completed).toBe(true);
+      expect(getByKey(db, "user:discord:a")).not.toBeNull();
+      expect(db.query("SELECT * FROM memory_entries").all()).toHaveLength(1);
+    } else {
+      expect(getByKey(db, "user:discord:a")).toBeNull();
+      expect(db.query("SELECT * FROM memory_entries").all()).toEqual([]);
     }
-    if (init?.method === "GET") return Response.json({ name: "work", type: 0 });
-    return Response.json({ id: "sent" });
-  }) as typeof fetch;
-  const user = { id: "a", username: "Alice", discriminator: "0" };
-  const first = handleMessageCreate("fake", {
-    id: "m",
-    channel_id: "first",
-    guild_id: "g",
-    author: user,
-    content: "remember that Orion uses port 8123",
-    attachments: [
-      {
-        id: "image",
-        filename: "image.png",
-        url: "https://file.test/image.png",
-        proxy_url: "https://file.test/image.png",
-        size: 3,
-        content_type: "image/png",
-      },
-    ],
-    mentions: [],
-    type: 0,
+  }
+);
+
+test("Discord fire does not deadlock a concurrent thread turn sharing its user session", async () => {
+  const child = Bun.spawn(["bun", "run", join(originalCwd, "tests/fixtures/discord-thread-delete-race.ts")], {
+    cwd,
+    env: process.env,
+    stdout: "pipe",
+    stderr: "pipe",
   });
-  await ready;
-  const forget = handleInteractionCreate("fake", {
-    id: "forget",
-    type: 2,
-    application_id: "app",
-    token: "fake",
-    channel_id: "second",
-    guild_id: "g",
-    member: { user },
-    data: { name: "forget" },
-  });
-  await Promise.race([forget, Bun.sleep(50)]);
-  release();
-  await Promise.all([first, forget]);
-  expect(getByKey(db, "user:discord:a")).toBeNull();
-  expect(db.query("SELECT * FROM memory_entries").all()).toEqual([]);
+  const deadline = setTimeout(() => child.kill("SIGKILL"), 6000);
+  try {
+    const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+  } finally {
+    clearTimeout(deadline);
+    child.kill();
+  }
 });
 
 test("deleting a shared thread waits for its first admitted turn before removing it", async () => {

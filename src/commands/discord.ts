@@ -243,6 +243,19 @@ async function resolveConversation(channelId: string, userId: string, guildId?: 
   return { policy, isThread, target: discordSessionTarget({ workspace: process.cwd(), channelId, userId, guildId, isThread }, policy) };
 }
 
+// Resolve channel metadata in admission order, then release this short routing
+// lane as soon as work has reserved its session lane. Model turns remain concurrent.
+async function routeConversation(
+  channelId: string, userId: string, guildId: string | undefined,
+  schedule: (conversation: Awaited<ReturnType<typeof resolveConversation>>) => Promise<void>,
+): Promise<void> {
+  const { completion } = await enqueueBridge("discord-routing", "", async () => {
+    const conversation = await resolveConversation(channelId, userId, guildId);
+    return { completion: schedule(conversation) };
+  });
+  await completion;
+}
+
 async function withAutoThread(
   token: string, channelId: string, userId: string, guildId: string, label: string,
   work: (conversation: Awaited<ReturnType<typeof resolveConversation>>) => Promise<void>,
@@ -396,222 +409,224 @@ async function processMessageCreate(token: string, message: DiscordMessage): Pro
     return;
   }
 
-  let { target, policy, isThread } = await resolveConversation(channelId, userId, message.guild_id);
-  const preparationKey = target.key;
-  return enqueueBridge("conversation", preparationKey, async () => {
-    if (policy.mode === "delivery-only" || policy.deliveryRole === "delivery") return;
-    const triggerReason = isGuild ? guildTriggerReason(message) : "direct_message";
-    if (isGuild && !triggerReason && !["listen", "free-response", "shared"].includes(policy.mode)) return;
+  // Classify management messages once: they operate on child channel lanes,
+  // so must not hold a session lane that a child turn may also need.
+  const cleanContent = botUserId
+    ? content.replace(new RegExp(`<@!?${botUserId}>`, "g"), "").trim()
+    : content;
+  const threadIntent = isGuild && cleanContent.length < 200 ? classifyThreadIntent(cleanContent) : null;
+  return routeConversation(channelId, userId, message.guild_id, ({ target, policy, isThread }) => {
+    const preparationKey = target.key;
+    const work = async () => {
+      if (policy.mode === "delivery-only" || policy.deliveryRole === "delivery") return;
+      const triggerReason = isGuild ? guildTriggerReason(message) : "direct_message";
+      if (isGuild && !triggerReason && !["listen", "free-response", "shared"].includes(policy.mode)) return;
 
-    // Detect attachments
-    const imageAttachments = message.attachments.filter(isImageAttachment);
-    const voiceAttachments = message.attachments.filter(isVoiceAttachment);
-    const hasImage = imageAttachments.length > 0;
-    const hasVoice = voiceAttachments.length > 0;
+      // Detect attachments
+      const imageAttachments = message.attachments.filter(isImageAttachment);
+      const voiceAttachments = message.attachments.filter(isVoiceAttachment);
+      const hasImage = imageAttachments.length > 0;
+      const hasVoice = voiceAttachments.length > 0;
 
-    if (!content.trim() && !hasImage && !hasVoice) return;
+      if (!content.trim() && !hasImage && !hasVoice) return;
 
-    // Strip bot mention from content for cleaner prompt
-    let cleanContent = content;
-    if (botUserId) {
-      cleanContent = cleanContent.replace(new RegExp(`<@!?${botUserId}>`, "g"), "").trim();
-    }
-
-    const command = cleanContent.startsWith("/") ? cleanContent.trim().split(/\s+/, 1)[0].toLowerCase() : null;
-    if (command && !isSkillAllowed(policy, command)) {
-      await sendMessage(config.token, channelId, `Skill ${command} is not allowed in this conversation.`);
-      return;
-    }
-
-    const label = message.author.username;
-    const mediaParts = [hasImage ? "image" : "", hasVoice ? "voice" : ""].filter(Boolean);
-    const mediaSuffix = mediaParts.length > 0 ? ` [${mediaParts.join("+")}]` : "";
-    console.log(
-      `[${new Date().toLocaleTimeString()}] Discord ${label}${mediaSuffix}: "${cleanContent.slice(0, 60)}${cleanContent.length > 60 ? "..." : ""}"`,
-    );
-
-    // Typing indicator loop (Discord typing lasts 10s, fire every 8s)
-    const typingInterval = setInterval(() => sendTyping(config.token, channelId), 8000);
-
-    try {
-      await sendTyping(config.token, channelId);
-
-      let imagePath: string | null = null;
-      let voicePath: string | null = null;
-      let voiceTranscript: string | null = null;
-
-      if (hasImage) {
-        try {
-          imagePath = await downloadDiscordAttachment(imageAttachments[0], "image");
-        } catch (err) {
-          console.error(`[Discord] Failed to download image for ${label}: ${err instanceof Error ? err.message : err}`);
-        }
+      const command = cleanContent.startsWith("/") ? cleanContent.trim().split(/\s+/, 1)[0].toLowerCase() : null;
+      if (command && !isSkillAllowed(policy, command)) {
+        await sendMessage(config.token, channelId, `Skill ${command} is not allowed in this conversation.`);
+        return;
       }
 
-      if (hasVoice) {
-        try {
-          voicePath = await downloadDiscordAttachment(voiceAttachments[0], "voice");
-        } catch (err) {
-          console.error(`[Discord] Failed to download voice for ${label}: ${err instanceof Error ? err.message : err}`);
-        }
+      const label = message.author.username;
+      const mediaParts = [hasImage ? "image" : "", hasVoice ? "voice" : ""].filter(Boolean);
+      const mediaSuffix = mediaParts.length > 0 ? ` [${mediaParts.join("+")}]` : "";
+      console.log(
+        `[${new Date().toLocaleTimeString()}] Discord ${label}${mediaSuffix}: "${cleanContent.slice(0, 60)}${cleanContent.length > 60 ? "..." : ""}"`,
+      );
 
-        if (voicePath) {
+      // Typing indicator loop (Discord typing lasts 10s, fire every 8s)
+      const typingInterval = setInterval(() => sendTyping(config.token, channelId), 8000);
+
+      try {
+        await sendTyping(config.token, channelId);
+
+        let imagePath: string | null = null;
+        let voicePath: string | null = null;
+        let voiceTranscript: string | null = null;
+
+        if (hasImage) {
           try {
-            debugLog(`Voice file saved: path=${voicePath}`);
-            voiceTranscript = await transcribeAudioToText(voicePath, {
-              debug: discordDebug,
-              log: (msg) => debugLog(msg),
-            });
+            imagePath = await downloadDiscordAttachment(imageAttachments[0], "image");
           } catch (err) {
-            console.error(`[Discord] Failed to transcribe voice for ${label}: ${err instanceof Error ? err.message : err}`);
+            console.error(`[Discord] Failed to download image for ${label}: ${err instanceof Error ? err.message : err}`);
           }
         }
-      }
 
-      // --- Thread management: pattern-based intent classification ---
-      if (isGuild && cleanContent.length < 200) {
-        const intent = classifyThreadIntent(cleanContent);
-        if (intent && intent.action === "hire" && intent.names.length > 0) {
-          const results: string[] = [];
-          for (const threadName of intent.names) {
+        if (hasVoice) {
+          try {
+            voicePath = await downloadDiscordAttachment(voiceAttachments[0], "voice");
+          } catch (err) {
+            console.error(`[Discord] Failed to download voice for ${label}: ${err instanceof Error ? err.message : err}`);
+          }
+
+          if (voicePath) {
             try {
-              const thread = await discordApi<{ id: string; name: string }>(
-                config.token,
-                "POST",
-                `/channels/${channelId}/threads`,
-                {
-                  name: threadName,
-                  type: 11, // PUBLIC_THREAD
-                  auto_archive_duration: 4320, // 3 days
-                },
-              );
-              knownThreads.set(thread.id, { parentId: channelId });
-              // Don't pre-create session — let Claude CLI create it on first message
-              // The real UUID will be captured and saved by runner.ts
-              await sendMessage(config.token, thread.id, `🧵 Thread **${threadName}** created with independent session. Start chatting!`);
-              results.push(`✅ **${threadName}** → <#${thread.id}>`);
-              console.log(`[Discord] Thread created: ${thread.id} name="${threadName}" parent=${channelId} knownSize=${knownThreads.size}`);
+              debugLog(`Voice file saved: path=${voicePath}`);
+              voiceTranscript = await transcribeAudioToText(voicePath, {
+                debug: discordDebug,
+                log: (msg) => debugLog(msg),
+              });
             } catch (err) {
-              results.push(`❌ **${threadName}** — ${err instanceof Error ? err.message : err}`);
+              console.error(`[Discord] Failed to transcribe voice for ${label}: ${err instanceof Error ? err.message : err}`);
             }
           }
-          await sendMessage(config.token, channelId, results.join("\n"));
-          return;
         }
 
-        if (intent && intent.action === "fire" && intent.names.length > 0) {
-          const results: string[] = [];
-          for (const targetName of intent.names) {
-            const targetLower = targetName.toLowerCase();
-            let foundId: string | null = null;
-            for (const [tid, info] of knownThreads.entries()) {
-              if (info.parentId === channelId) {
-                try {
-                  const ch = await discordApi<{ id: string; name: string }>(config.token, "GET", `/channels/${tid}`);
-                  if (ch.name.toLowerCase() === targetLower) {
-                    foundId = tid;
-                    break;
-                  }
-                } catch { /* thread might be gone */ }
-              }
-            }
-            if (foundId) {
+        // --- Thread management: pattern-based intent classification ---
+        if (isGuild && cleanContent.length < 200) {
+          const intent = threadIntent;
+          if (intent && intent.action === "hire" && intent.names.length > 0) {
+            const results: string[] = [];
+            for (const threadName of intent.names) {
               try {
-                await discordApi(config.token, "DELETE", `/channels/${foundId}`);
-                await enqueueBridge("discord", foundId, () => deleteThreadSession("discord", foundId));
-                knownThreads.delete(foundId);
-                results.push(`🗑️ **${targetName}** — deleted`);
+                const thread = await discordApi<{ id: string; name: string }>(
+                  config.token,
+                  "POST",
+                  `/channels/${channelId}/threads`,
+                  {
+                    name: threadName,
+                    type: 11, // PUBLIC_THREAD
+                    auto_archive_duration: 4320, // 3 days
+                  },
+                );
+                knownThreads.set(thread.id, { parentId: channelId });
+                // Don't pre-create session — let Claude CLI create it on first message
+                // The real UUID will be captured and saved by runner.ts
+                await sendMessage(config.token, thread.id, `🧵 Thread **${threadName}** created with independent session. Start chatting!`);
+                results.push(`✅ **${threadName}** → <#${thread.id}>`);
+                console.log(`[Discord] Thread created: ${thread.id} name="${threadName}" parent=${channelId} knownSize=${knownThreads.size}`);
               } catch (err) {
-                results.push(`❌ **${targetName}** — ${err instanceof Error ? err.message : err}`);
+                results.push(`❌ **${threadName}** — ${err instanceof Error ? err.message : err}`);
               }
-            } else {
-              results.push(`❌ **${targetName}** — not found`);
+            }
+            await sendMessage(config.token, channelId, results.join("\n"));
+            return;
+          }
+
+          if (intent && intent.action === "fire" && intent.names.length > 0) {
+            const results: string[] = [];
+            for (const targetName of intent.names) {
+              const targetLower = targetName.toLowerCase();
+              let foundId: string | null = null;
+              for (const [tid, info] of knownThreads.entries()) {
+                if (info.parentId === channelId) {
+                  try {
+                    const ch = await discordApi<{ id: string; name: string }>(config.token, "GET", `/channels/${tid}`);
+                    if (ch.name.toLowerCase() === targetLower) {
+                      foundId = tid;
+                      break;
+                    }
+                  } catch { /* thread might be gone */ }
+                }
+              }
+              if (foundId) {
+                try {
+                  await discordApi(config.token, "DELETE", `/channels/${foundId}`);
+                  await enqueueBridge("discord", foundId, () => deleteThreadSession("discord", foundId));
+                  knownThreads.delete(foundId);
+                  results.push(`🗑️ **${targetName}** — deleted`);
+                } catch (err) {
+                  results.push(`❌ **${targetName}** — ${err instanceof Error ? err.message : err}`);
+                }
+              } else {
+                results.push(`❌ **${targetName}** — not found`);
+              }
+            }
+            await sendMessage(config.token, channelId, results.join("\n"));
+            return;
+          }
+        }
+
+        const reply = async () => {
+          // Skill routing: detect slash commands and resolve to SKILL.md prompts
+          let skillContext: string | null = null;
+          if (command) {
+            try {
+              skillContext = await resolveSkillPrompt(command);
+              if (skillContext) {
+                debugLog(`Skill resolved for ${command}: ${skillContext.length} chars`);
+              }
+            } catch (err) {
+              debugLog(`Skill resolution failed for ${command}: ${err instanceof Error ? err.message : err}`);
             }
           }
-          await sendMessage(config.token, channelId, results.join("\n"));
-          return;
-        }
-      }
 
-      const reply = async () => {
-        // Skill routing: detect slash commands and resolve to SKILL.md prompts
-        let skillContext: string | null = null;
-        if (command) {
-          try {
-            skillContext = await resolveSkillPrompt(command);
-            if (skillContext) {
-              debugLog(`Skill resolved for ${command}: ${skillContext.length} chars`);
-            }
-          } catch (err) {
-            debugLog(`Skill resolution failed for ${command}: ${err instanceof Error ? err.message : err}`);
+          // Build prompt (same pattern as Telegram)
+          const promptParts = [`[Discord from ${label}]`];
+          if (skillContext) {
+            const args = cleanContent.trim().slice(command!.length).trim();
+            promptParts.push(`<command-name>${command}</command-name>`);
+            promptParts.push(skillContext);
+            if (args) promptParts.push(`User arguments: ${args}`);
+          } else if (cleanContent.trim()) {
+            promptParts.push(`Message: ${cleanContent}`);
           }
-        }
+          if (imagePath) {
+            promptParts.push(`Image path: ${imagePath}`);
+            promptParts.push("The user attached an image. Inspect this image file directly before answering.");
+          } else if (hasImage) {
+            promptParts.push("The user attached an image, but downloading it failed. Respond and ask them to resend.");
+          }
+          if (voiceTranscript) {
+            promptParts.push(`Voice transcript: ${voiceTranscript}`);
+            promptParts.push("The user attached voice audio. Use the transcript as their spoken message.");
+          } else if (hasVoice) {
+            promptParts.push(
+              "The user attached voice audio, but it could not be transcribed. Respond and ask them to resend a clearer clip.",
+            );
+          }
 
-        // Build prompt (same pattern as Telegram)
-        const promptParts = [`[Discord from ${label}]`];
-        if (skillContext) {
-          const args = cleanContent.trim().slice(command!.length).trim();
-          promptParts.push(`<command-name>${command}</command-name>`);
-          promptParts.push(skillContext);
-          if (args) promptParts.push(`User arguments: ${args}`);
-        } else if (cleanContent.trim()) {
-          promptParts.push(`Message: ${cleanContent}`);
-        }
-        if (imagePath) {
-          promptParts.push(`Image path: ${imagePath}`);
-          promptParts.push("The user attached an image. Inspect this image file directly before answering.");
-        } else if (hasImage) {
-          promptParts.push("The user attached an image, but downloading it failed. Respond and ask them to resend.");
-        }
-        if (voiceTranscript) {
-          promptParts.push(`Voice transcript: ${voiceTranscript}`);
-          promptParts.push("The user attached voice audio. Use the transcript as their spoken message.");
-        } else if (hasVoice) {
-          promptParts.push(
-            "The user attached voice audio, but it could not be transcribed. Respond and ask them to resend a clearer clip.",
-          );
-        }
+          const prefixedPrompt = promptParts.join("\n");
+          // Use thread-specific session if message is in a known thread
+          const threadId = target;
+          const statusSink = createDiscordStatusSink({
+            transport: discordStatusTransport(config.token),
+            channelId,
+          });
+          const result = await runUserMessage("discord", {text: cleanContent || voiceTranscript || "", context: prefixedPrompt}, threadId, statusSink, "discord");
 
-        const prefixedPrompt = promptParts.join("\n");
-        // Use thread-specific session if message is in a known thread
-        const threadId = target;
-        const statusSink = createDiscordStatusSink({
-          transport: discordStatusTransport(config.token),
-          channelId,
-        });
-        const result = await runUserMessage("discord", {text: cleanContent || voiceTranscript || "", context: prefixedPrompt}, threadId, statusSink, "discord");
-
-        if (result.exitCode !== 0) {
-          await sendMessage(config.token, channelId, `Error (exit ${result.exitCode}): ${result.stderr || result.stdout || "Unknown error"}`);
+          if (result.exitCode !== 0) {
+            await sendMessage(config.token, channelId, `Error (exit ${result.exitCode}): ${result.stderr || result.stdout || "Unknown error"}`);
+          } else {
+            const visibleText = extractSessionAndResultFromText(result.stdout || "").result ?? result.stdout ?? "";
+            const { cleanedText, reactionEmoji } = extractReactionDirective(visibleText);
+            if (reactionEmoji) {
+              await sendReaction(config.token, message.channel_id, message.id, reactionEmoji).catch((err) => {
+                console.error(`[Discord] Failed to send reaction for ${label}: ${err instanceof Error ? err.message : err}`);
+              });
+            }
+            await sendMessage(config.token, channelId, cleanedText || "(empty response)");
+          }
+        };
+        if (message.guild_id && policy.autoThread && !isThread) {
+          await withAutoThread(config.token, channelId, userId, message.guild_id, cleanContent || `${label}'s conversation`, async conversation => {
+            target = conversation.target;
+            channelId = target.channel!;
+            if (target.key === preparationKey) await reply();
+            else await enqueueBridge("conversation", target.key, reply);
+          }, message.id);
         } else {
-          const visibleText = extractSessionAndResultFromText(result.stdout || "").result ?? result.stdout ?? "";
-          const { cleanedText, reactionEmoji } = extractReactionDirective(visibleText);
-          if (reactionEmoji) {
-            await sendReaction(config.token, message.channel_id, message.id, reactionEmoji).catch((err) => {
-              console.error(`[Discord] Failed to send reaction for ${label}: ${err instanceof Error ? err.message : err}`);
-            });
-          }
-          await sendMessage(config.token, channelId, cleanedText || "(empty response)");
+          await reply();
         }
-      };
-      if (message.guild_id && policy.autoThread && !isThread) {
-        await withAutoThread(config.token, channelId, userId, message.guild_id, cleanContent || `${label}'s conversation`, async conversation => {
-          target = conversation.target;
-          channelId = target.channel!;
-          if (target.key === preparationKey) await reply();
-          else await enqueueBridge("conversation", target.key, reply);
-        }, message.id);
-      } else {
-        await reply();
-      }
 
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[Discord] Error for ${label}: ${errMsg}`);
-      await sendMessage(config.token, channelId, `Error: ${errMsg}`);
-    } finally {
-      clearInterval(typingInterval);
-    }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.error(`[Discord] Error for ${label}: ${errMsg}`);
+        await sendMessage(config.token, channelId, `Error: ${errMsg}`);
+      } finally {
+        clearInterval(typingInterval);
+      }
+    };
+    return threadIntent?.names.length ? work() : enqueueBridge("conversation", preparationKey, work);
   });
 }
 
@@ -651,8 +666,8 @@ async function processInteractionCreate(token: string, interaction: DiscordInter
     return;
   }
   const interactionChannelId = interaction.channel_id;
-  const { target, policy, isThread } = await resolveConversation(interactionChannelId, actorId, interaction.guild_id);
-  return enqueueBridge("conversation", target.key, async () => {
+  return routeConversation(interactionChannelId, actorId, interaction.guild_id, ({ target, policy, isThread }) =>
+    enqueueBridge("conversation", target.key, async () => {
     if (policy.mode === "delivery-only" || policy.deliveryRole === "delivery") {
       await respondToInteraction(interaction, { content: "This channel is delivery-only.", flags: 64 });
       return;
@@ -856,7 +871,8 @@ async function processInteractionCreate(token: string, interaction: DiscordInter
 
     // Default ack for any other interaction type
     await respondToInteraction(interaction, { content: "OK", flags: 64 });
-  });
+    })
+  );
 }
 
 // --- Guild join handler ---

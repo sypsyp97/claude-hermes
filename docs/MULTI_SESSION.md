@@ -28,7 +28,11 @@ Runner work is serialized by canonical conversation key; idle queue entries are
 removed. Different lanes can run concurrently. An omitted target retains the
 legacy workspace API; a string retains the source-qualified thread API.
 Transport admission reserves channel arrival order before attachment and metadata
-lookups. A shared budget limits Claude and local STT to four child processes;
+lookups. Discord reserves canonical lanes in channel-lookup order; shared sessions
+serialize preparation and controls across channels/topics. Thread management uses
+channel lanes without holding a session lane while waiting on a child thread.
+The routing lane releases before model work, so independent sessions can run
+concurrently. A shared budget limits Claude and local STT to four child processes;
 queued execution can be cancelled when its bridge stops.
 
 - `/reset` waits behind admitted work and clears this conversation's Claude ID
