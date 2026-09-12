@@ -352,6 +352,8 @@ test.each(["message", "slash"] as const)(
         started();
         await gate;
       }
+      // A valid acknowledgement can take longer than one event-loop tick.
+      if (String(url).endsWith("/callback")) await Bun.sleep(150);
       return fallback(url as string, init);
     }) as typeof fetch;
     const slow = discord("fake", {
@@ -377,11 +379,21 @@ test.each(["message", "slash"] as const)(
               data: { name: "cancel" },
             })
       );
-      await Promise.race([cancel, Bun.sleep(100)]);
-      const cancelled = signal.aborted;
-      release();
-      await Promise.allSettled([slow, cancel]);
-      expect(cancelled).toBe(true);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          cancel,
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error("Cancellation waited for unrelated routing")), 2000);
+          }),
+        ]);
+        // Assert ordering while the unrelated metadata request is still blocked.
+        expect(signal.aborted).toBe(true);
+      } finally {
+        clearTimeout(timeout);
+        release();
+        await Promise.allSettled([slow, cancel]);
+      }
     });
   }
 );
