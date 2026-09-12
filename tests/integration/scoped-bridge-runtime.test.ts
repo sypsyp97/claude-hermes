@@ -85,11 +85,15 @@ test("recall uses human text before clock, bridge and skill context consume quer
   expect(result.stdout).toContain("8123");
 });
 
-test.each(["creation", "attachment"] as const)(
+test.each(["creation", "attachment", "shared"] as const)(
   "Telegram topic forget cannot overtake first-turn %s",
   async (phase) => {
     const db = await getSharedDb();
-    upsertPolicy(db, { source: "telegram", channel: "-60" }, { mode: "listen", autoThread: true });
+    upsertPolicy(
+      db,
+      { source: "telegram", channel: "-60" },
+      { mode: "listen", autoThread: true, ...(phase === "shared" ? { sessionScope: "shared" } : {}) }
+    );
     let started!: () => void;
     let release!: () => void;
     const ready = new Promise<void>((r) => {
@@ -107,7 +111,7 @@ test.each(["creation", "attachment"] as const)(
         return Response.json({ ok: true, result: { message_thread_id: 81 } });
       }
       if (String(url).endsWith("/getFile")) {
-        if (phase === "attachment") {
+        if (phase !== "creation") {
           started();
           await gate;
         }
@@ -127,11 +131,16 @@ test.each(["creation", "attachment"] as const)(
       photo: [{ file_id: "image", width: 1, height: 1 }],
     });
     await ready;
-    const forget = handleTelegramMessage({ ...base, message_id: 2, message_thread_id: 81, text: "/forget" });
+    const forget = handleTelegramMessage({
+      ...base,
+      message_id: 2,
+      message_thread_id: phase === "shared" ? 82 : 81,
+      text: "/forget",
+    });
     await Promise.race([forget, Bun.sleep(50)]);
     release();
     await Promise.all([first, forget]);
-    expect(getByKey(db, "thread:telegram:-60:81")).toBeNull();
+    expect(getByKey(db, phase === "shared" ? "shared:telegram:_:-60" : "thread:telegram:-60:81")).toBeNull();
     expect(db.query("SELECT * FROM memory_entries").all()).toEqual([]);
   }
 );
@@ -260,6 +269,69 @@ test.each(["message", "skill"] as const)(
     expect(db.query("SELECT * FROM memory_entries").all()).toEqual([]);
   }
 );
+
+test("Discord per-user forget in another channel waits for shared-session attachment preparation", async () => {
+  const db = await getSharedDb();
+  for (const channel of ["first", "second"])
+    upsertPolicy(
+      db,
+      { source: "discord", guild: "g", channel },
+      { mode: "listen", sessionScope: "per-user" }
+    );
+  let started!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((r) => {
+    started = r;
+  });
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    if (String(url) === "https://file.test/image.png") {
+      started();
+      await gate;
+      return new Response(new Uint8Array([1, 2, 3]));
+    }
+    if (init?.method === "GET") return Response.json({ name: "work", type: 0 });
+    return Response.json({ id: "sent" });
+  }) as typeof fetch;
+  const user = { id: "a", username: "Alice", discriminator: "0" };
+  const first = handleMessageCreate("fake", {
+    id: "m",
+    channel_id: "first",
+    guild_id: "g",
+    author: user,
+    content: "remember that Orion uses port 8123",
+    attachments: [
+      {
+        id: "image",
+        filename: "image.png",
+        url: "https://file.test/image.png",
+        proxy_url: "https://file.test/image.png",
+        size: 3,
+        content_type: "image/png",
+      },
+    ],
+    mentions: [],
+    type: 0,
+  });
+  await ready;
+  const forget = handleInteractionCreate("fake", {
+    id: "forget",
+    type: 2,
+    application_id: "app",
+    token: "fake",
+    channel_id: "second",
+    guild_id: "g",
+    member: { user },
+    data: { name: "forget" },
+  });
+  await Promise.race([forget, Bun.sleep(50)]);
+  release();
+  await Promise.all([first, forget]);
+  expect(getByKey(db, "user:discord:a")).toBeNull();
+  expect(db.query("SELECT * FROM memory_entries").all()).toEqual([]);
+});
 
 test("deleting a shared thread waits for its first admitted turn before removing it", async () => {
   const target = discordSessionTarget(
