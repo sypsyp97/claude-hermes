@@ -1,6 +1,9 @@
-import { ensureProjectClaudeMd, run, runUserMessage, compactCurrentSession } from "../runner";
+import { ensureProjectClaudeMd, run, runUserMessage, compactCurrentSession, resetCurrentSession } from "../runner";
 import { getSettings, loadSettings } from "../config";
-import { resetSession, peekSession } from "../sessions";
+import { pollUpdates } from "../adapters/telegram/polling";
+import { telegramSessionTarget } from "../router/bridge-session";
+import { sessionAccess } from "../runtime/session-target";
+import { telegramApi as callApi, TelegramApiError } from "./telegram-api";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -290,18 +293,6 @@ function extractTelegramCommand(text: string): string | null {
   return firstToken.split("@", 1)[0].toLowerCase();
 }
 
-async function callApi<T>(token: string, method: string, body?: Record<string, unknown>): Promise<T> {
-  const res = await fetch(`${API_BASE}${token}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    throw new Error(`Telegram API ${method}: ${res.status} ${res.statusText}`);
-  }
-  return (await res.json()) as T;
-}
-
 function telegramStatusTransport(token: string): TelegramTransport {
   return {
     async sendMessage(chatId, text, threadId) {
@@ -341,8 +332,9 @@ async function sendMessage(token: string, chatId: number, text: string, threadId
         parse_mode: "HTML",
         ...(threadId ? { message_thread_id: threadId } : {}),
       });
-    } catch {
-      // Fallback to plain text if HTML parsing fails
+    } catch (err) {
+      if (!(err instanceof TelegramApiError) || err.code !== 400 || !/parse entities|unsupported start tag|entity/i.test(err.description)) throw err;
+      // Telegram explicitly rejected formatting; the original was not sent.
       await callApi(token, "sendMessage", {
         chat_id: chatId,
         text: normalized.slice(i, i + MAX_LEN),
@@ -583,7 +575,7 @@ async function handleMyChatMember(update: TelegramMyChatMemberUpdate): Promise<v
     "Write a short first message for the group. It should confirm I was added and explain how to trigger me.";
 
   try {
-    const result = await run("telegram", eventPrompt);
+    const result = await run("telegram", eventPrompt, telegramSessionTarget({ workspace: process.cwd(), chatId: chat.id, userId: update.from.id, isDm: false }), undefined, "telegram");
     if (result.exitCode !== 0) {
       await sendMessage(config.token, chat.id, "I was added to this group. Mention me with a command to start.");
       return;
@@ -597,7 +589,7 @@ async function handleMyChatMember(update: TelegramMyChatMemberUpdate): Promise<v
 
 // --- Message handler ---
 
-async function handleMessage(message: TelegramMessage): Promise<void> {
+export async function handleMessage(message: TelegramMessage): Promise<void> {
   const config = getSettings().telegram;
   const userId = message.from?.id;
   const chatId = message.chat.id;
@@ -655,6 +647,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     return;
   }
 
+  const target = telegramSessionTarget({ workspace: process.cwd(), chatId, userId, topicId: threadId, isDm: isPrivate });
   const command = text ? extractTelegramCommand(text) : null;
   if (command === "/start") {
     await sendMessage(
@@ -667,8 +660,8 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
   }
 
   if (command === "/reset") {
-    await resetSession();
-    await sendMessage(config.token, chatId, "Global session reset. Next message starts fresh.", threadId);
+    await resetCurrentSession({ target });
+    await sendMessage(config.token, chatId, "This conversation was reset. Next message starts fresh; saved memory is retained.", threadId);
     return;
   }
 
@@ -679,13 +672,13 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       chatId,
       ...(threadId !== undefined && { threadId }),
     });
-    const result = await compactCurrentSession({ sink });
+    const result = await compactCurrentSession({ sink, target });
     await sendMessage(config.token, chatId, result.message, threadId);
     return;
   }
 
   if (command === "/status") {
-    const session = await peekSession();
+    const session = await sessionAccess(target).peek();
     const settings = getSettings();
     if (!session) {
       await sendMessage(config.token, chatId, "📊 No active session.", threadId);
@@ -706,7 +699,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
   }
 
   if (command === "/context") {
-    const session = await peekSession();
+    const session = await sessionAccess(target).peek();
     if (!session) {
       await sendMessage(config.token, chatId, "No active session.", threadId);
       return;
@@ -868,7 +861,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       chatId,
       ...(threadId !== undefined && { threadId }),
     });
-    const threadArg = threadId !== undefined ? String(threadId) : undefined;
+    const threadArg = target;
     const result = await runUserMessage("telegram", prefixedPrompt, threadArg, statusSink, "telegram");
 
     if (result.exitCode !== 0) {
@@ -975,13 +968,16 @@ async function registerBotCommands(token: string): Promise<void> {
 
 // --- Polling loop ---
 
-let running = true;
+let pollingController: AbortController | null = null;
+let pollingOffset = 0;
+let pollingToken: string | null = null;
 
-async function poll(): Promise<void> {
+async function poll(signal: AbortSignal): Promise<void> {
   const config = getSettings().telegram;
-  let offset = 0;
+  if (pollingToken !== config.token) { pollingOffset = 0; pollingToken = config.token; }
   try {
-    const me = await callApi<{ ok: boolean; result: TelegramMe }>(config.token, "getMe");
+    const me = await callApi<{ ok: boolean; result: TelegramMe }>(config.token, "getMe", undefined, { signal });
+    if (signal.aborted) return;
     if (me.ok) {
       botUsername = me.result.username ?? null;
       botId = me.result.id;
@@ -992,6 +988,7 @@ async function poll(): Promise<void> {
     console.error(`[Telegram] getMe failed: ${err instanceof Error ? err.message : err}`);
   }
 
+  if (signal.aborted) return;
   console.log("Telegram bot started (long polling)");
   console.log(`  Allowed users: ${config.allowedUserIds.length === 0 ? "none (fail-closed)" : config.allowedUserIds.join(", ")}`);
   if (telegramDebug) console.log("  Debug: enabled");
@@ -999,49 +996,21 @@ async function poll(): Promise<void> {
   // Register available skills as bot command menu (non-blocking)
   registerBotCommands(config.token).catch(() => {});
 
-  while (running) {
-    try {
-      const data = await callApi<{ ok: boolean; result: TelegramUpdate[] }>(
-        config.token,
-        "getUpdates",
-        { offset, timeout: 30, allowed_updates: ["message", "my_chat_member", "callback_query"] }
-      );
-
-      if (!data.ok || !data.result.length) continue;
-
-      for (const update of data.result) {
-        debugLog(
-          `Update ${update.update_id} keys=${Object.keys(update).join(",")}`
-        );
-        offset = update.update_id + 1;
-        const incomingMessages = [
-          update.message,
-          update.edited_message,
-          update.channel_post,
-          update.edited_channel_post,
-        ].filter((m): m is TelegramMessage => Boolean(m));
-        for (const incoming of incomingMessages) {
-          handleMessage(incoming).catch((err) => {
-            console.error(`[Telegram] Unhandled: ${err}`);
-          });
-        }
-        if (update.my_chat_member) {
-          handleMyChatMember(update.my_chat_member).catch((err) => {
-            console.error(`[Telegram] my_chat_member unhandled: ${err}`);
-          });
-        }
-        if (update.callback_query) {
-          handleCallbackQuery(update.callback_query).catch((err) => {
-            console.error(`[Telegram] callback_query unhandled: ${err}`);
-          });
-        }
-      }
-    } catch (err) {
-      if (!running) break;
-      console.error(`[Telegram] Poll error: ${err instanceof Error ? err.message : err}`);
-      await Bun.sleep(5000);
-    }
-  }
+  await pollUpdates<TelegramUpdate>({
+    signal, initialOffset: pollingOffset, onOffset: offset => { pollingOffset = offset; },
+    request: async offset => {
+      const data = await callApi<{ ok: boolean; result: TelegramUpdate[] }>(config.token, "getUpdates",
+        { offset, timeout: 30, allowed_updates: ["message", "my_chat_member", "callback_query"] },
+        { signal, maxRetries: 0 });
+      return data.result;
+    },
+    handle: async update => {
+      if (update.message) await handleMessage(update.message);
+      if (update.my_chat_member) await handleMyChatMember(update.my_chat_member);
+      if (update.callback_query) await handleCallbackQuery(update.callback_query);
+    },
+    onError: err => console.error(`[Telegram] Poll error: ${err instanceof Error ? err.message : err}`),
+  });
 }
 
 // --- Exports ---
@@ -1049,15 +1018,22 @@ async function poll(): Promise<void> {
 /** Send a message to a specific chat (used by heartbeat forwarding) */
 export { sendMessage };
 
-process.on("SIGTERM", () => { running = false; });
-process.on("SIGINT", () => { running = false; });
+export function stopPolling(): void {
+  pollingController?.abort(); pollingController = null;
+  botId = null; botUsername = null;
+}
+process.on("SIGTERM", stopPolling);
+process.on("SIGINT", stopPolling);
 
 /** Start polling in-process (called by start.ts when token is configured) */
 export function startPolling(debug = false): void {
   telegramDebug = debug;
+  stopPolling();
+  const controller = new AbortController();
+  pollingController = controller;
   (async () => {
     await ensureProjectClaudeMd();
-    await poll();
+    if (!controller.signal.aborted) await poll(controller.signal);
   })().catch((err) => {
     console.error(`[Telegram] Fatal: ${err}`);
   });
@@ -1067,5 +1043,7 @@ export function startPolling(debug = false): void {
 export async function telegram() {
   await loadSettings();
   await ensureProjectClaudeMd();
-  await poll();
+  stopPolling();
+  pollingController = new AbortController();
+  await poll(pollingController.signal);
 }

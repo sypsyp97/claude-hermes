@@ -1,118 +1,64 @@
-# Multi-Session Thread Support
+# Conversation sessions
 
-Technical documentation for Claude Hermes's multi-session thread feature.
+Production Discord and Telegram handlers resolve a `SessionTarget` shared by
+execution, reset, compact, status, context lookup and proactive memory recall.
+SQLite `state.db` is authoritative; legacy JSON files are migration inputs.
 
-## Overview
+## Default routing
 
-Discord threads get independent Claude CLI sessions, enabling parallel conversations. The main channel and DMs continue using the single global session (backward compatible).
+| Conversation | Canonical key | Sharing |
+| --- | --- | --- |
+| Discord DM | `user:discord:<user>` | User's DMs |
+| Discord server channel | `channel-user:discord:<guild>:<channel>:<user>` | User in channel |
+| Discord thread | `thread:discord:<thread>` | Thread participants |
+| Explicit Discord shared policy | `shared:discord:<guild>:<channel>` | Channel participants |
+| Telegram private chat | `user:telegram:<user>` | Private chat |
+| Telegram group | `channel-user:telegram::<chat>:<user>` | User in group |
+| Telegram forum topic | `thread:telegram:<chat>:<topic>` | Topic participants |
+| CLI/heartbeat without target | `workspace:<workspace-hash>` | Trusted workspace |
 
-## Architecture
+Threads inherit parent channel policy; thread-specific overrides take precedence.
+Existing Discord thread keys remain valid. Old workspace history is not assigned
+to new bridge users. Ambiguous legacy bare Telegram topic IDs are not guessed
+into a group. The new bridge conversations start fresh on upgrade.
 
-```
-Discord Gateway
-  │
-  ├─ Main channel message ──→ Global Queue ──→ Global Session (session.json)
-  ├─ DM message ─────────────→ Global Queue ──→ Global Session (session.json)
-  │
-  ├─ Thread A message ───────→ Thread A Queue ──→ Thread A Session (sessions.json)
-  └─ Thread B message ───────→ Thread B Queue ──→ Thread B Session (sessions.json)
-```
+## Execution and controls
 
-- **Global queue**: Serializes non-thread messages (existing behavior).
-- **Per-thread queues**: Each thread has its own queue. Different threads execute in parallel; messages within the same thread are serialized.
+Runner work is serialized by canonical conversation key; idle queue entries are
+removed. Different lanes can run concurrently. An omitted target retains the
+legacy workspace API; a string retains the source-qualified thread API.
 
-## Session Lifecycle
+- `/reset` waits behind admitted work and clears this conversation's Claude ID
+  and counters. Messages, facts and native auto memory remain searchable. Reset
+  is not data erasure.
+- `/compact` resumes the addressed session on the same execution lane.
+- `/status` and `/context` inspect the addressed conversation.
+- Discord archival retains context for unarchival. Rejoin skips archived threads.
+  Deletion removes the SQLite session, messages and attributed facts after admitted
+  work. Native Claude transcript/memory files have a separate lifecycle.
+- Timeout terminates the child before releasing its lane, without replaying the task.
 
-### Creation
-1. A message arrives in a Discord thread.
-2. `discord.ts` detects the thread via `knownThreads` cache (populated from `GUILD_CREATE`, `THREAD_CREATE`, `THREAD_LIST_SYNC` events).
-3. `runUserMessage()` is called with the `threadId`.
-4. `execClaude()` checks `sessionManager.getThreadSession(threadId)` — returns `null` for new threads.
-5. Claude CLI is invoked with `--output-format json` to bootstrap a new session.
-6. The returned `session_id` is saved via `sessionManager.createThreadSession(threadId, sessionId)`.
+## Memory
 
-### Resume
-1. Subsequent messages in the same thread hit `getThreadSession(threadId)` which returns the existing `sessionId`.
-2. Claude CLI is invoked with `--resume <sessionId>`.
-3. Turn count is incremented per-thread.
+Scoped SQLite recall selects the exact key and workspace, plus explicitly shared
+workspace facts. Relevant older messages precede recent snippets in the digest.
+Native Claude auto memory uses
+`.claude/hermes/claude-memory/<sha256-of-conversation-key>/`.
+`memoryScope: none` disables automatic injection and native memory creation;
+successful transcripts still persist. Project files and native CLI configuration
+remain shared under the workspace's trust policy.
 
-### Cleanup
-Sessions are removed when:
-- **Thread deleted**: `THREAD_DELETE` event triggers `removeThreadSession(threadId)`.
-- **Thread archived**: `THREAD_UPDATE` with `thread_metadata.archived = true` triggers cleanup.
+See [the reliability review](AGENT_RELIABILITY_REVIEW.md) for Claude version
+requirements, TDD coverage and remaining durability/isolation limitations.
 
-## Concurrency Model
+## Implementation
 
-```
-Global Queue:    [msg1] → [msg2] → [msg3]     (serial)
-Thread A Queue:  [msgA1] → [msgA2]             (serial within thread)
-Thread B Queue:  [msgB1] → [msgB2]             (serial within thread)
-
-Thread A and Thread B run in parallel.
-Global Queue runs independently of all thread queues.
-```
-
-Each queue prevents concurrent `--resume` calls on the same session (which would cause Claude CLI errors). Different sessions can safely run concurrently.
-
-## Storage
-
-### Global session: `.claude/hermes/session.json`
-```json
-{
-  "sessionId": "uuid",
-  "createdAt": "ISO8601",
-  "lastUsedAt": "ISO8601",
-  "turnCount": 42,
-  "compactWarned": false
-}
-```
-
-### Thread sessions: `.claude/hermes/sessions.json`
-```json
-{
-  "threads": {
-    "1234567890": {
-      "sessionId": "uuid",
-      "threadId": "1234567890",
-      "createdAt": "ISO8601",
-      "lastUsedAt": "ISO8601",
-      "turnCount": 10,
-      "compactWarned": false
-    }
-  }
-}
-```
-
-Thread sessions use the Discord thread channel ID as the key.
-
-## Files
-
-| File | Role |
-|------|------|
-| `src/sessionManager.ts` | Thread session CRUD, storage in `sessions.json` |
-| `src/runner.ts` | Per-thread queues, `threadId` parameter on `run()`/`runUserMessage()`/`execClaude()` |
-| `src/commands/discord.ts` | Thread detection via `knownThreads` cache, event handlers, `/status` enhancement |
-| `src/sessions.ts` | Global session (unchanged) |
-
-## Thread Detection
-
-Discord thread channels are tracked via gateway events:
-
-| Event | Action |
-|-------|--------|
-| `GUILD_CREATE` | Cache all active threads from `data.threads` |
-| `THREAD_CREATE` | Add thread to cache |
-| `THREAD_DELETE` | Remove from cache + cleanup session |
-| `THREAD_UPDATE` | Remove if archived, add if unarchived |
-| `THREAD_LIST_SYNC` | Bulk-add active threads |
-
-The `knownThreads` map stores `threadId → { parentId }`. When a message's `channel_id` matches a known thread, it's routed to a thread-specific session.
-
-Threads in listen channels (where the parent channel is in `listenChannels`) auto-respond without requiring a mention.
-
-## Limitations
-
-- No max thread session limit. Relies on Claude CLI's own rate limiting.
-- Thread sessions are not automatically compacted (global `/compact` command only affects the global session).
-- `/reset` only resets the global session, not thread sessions.
-- Thread sessions persist until thread deletion/archival.
+| Module | Responsibility |
+| --- | --- |
+| `src/router/bridge-session.ts` | Transport identity to canonical target |
+| `src/runtime/session-target.ts` | Scoped state and native memory arguments |
+| `src/runner.ts` | Execution/control queues, child lifetime, persistence |
+| `src/memory/runtime-digest.ts` | Bounded recall and provenance filtering |
+| `src/adapters/discord/channel-policy.ts` | Defaults, inheritance and overrides |
+| `src/adapters/discord/gateway.ts` | Reconnect, resume, heartbeat and cancellation |
+| `src/adapters/telegram/polling.ts` | Poll admission, offsets and cancellation |

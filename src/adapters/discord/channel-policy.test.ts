@@ -67,3 +67,37 @@ describe("resolveDiscordPolicy", () => {
     expect(policy.allowedSkills).toEqual(["summarise"]);
   });
 });
+
+test("threads inherit parent delivery policy before child overrides", async () => {
+  const db = openDb({ path: ":memory:" });
+  await applyMigrations(db);
+  try {
+    policiesRepo.upsertPolicy(
+      db,
+      { source: "discord", guild: "g", channel: "parent" },
+      { mode: "delivery-only", deliveryRole: "delivery" }
+    );
+    const hints = { guild: "g", channel: "thread", parentChannel: "parent", isThread: true };
+    expect(resolveDiscordPolicy(db, hints).mode).toBe("delivery-only");
+    policiesRepo.upsertPolicy(
+      db,
+      { source: "discord", guild: "g", channel: "thread" },
+      { mode: "listen", deliveryRole: "interactive" }
+    );
+    expect(resolveDiscordPolicy(db, hints).mode).toBe("listen");
+  } finally {
+    closeDb(db);
+  }
+});
+
+test("thread defaults keep existing per-thread sessions and legacy listen settings", async () => {
+  const db = openDb({ path: ":memory:" });
+  await applyMigrations(db);
+  try {
+    const policy = resolveDiscordPolicy(db, { guild: "g", channel: "t", isThread: true, legacyListen: true });
+    expect(policy.sessionScope).toBe("per-thread");
+    expect(policy.mode).toBe("free-response");
+  } finally {
+    closeDb(db);
+  }
+});

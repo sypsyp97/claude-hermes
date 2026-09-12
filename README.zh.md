@@ -28,7 +28,7 @@ Claude Hermes 把你的 Claude Code 变成一个不睡觉的个人助理：后�
 /claude-hermes:start
 ```
 
-setup wizard 会一路引导你配 model、heartbeat、Telegram、Discord 和 security；配完 daemon 就在后台跑起来了。唯一的 runtime 依赖是 Bun — 如果没装，`start` 会问你要不要自动装一个。
+setup wizard 会一路引导你配 model、heartbeat、Telegram、Discord 和 security；配完 daemon 就在后台跑起来了。需要 Bun 和 **Claude Code 2.1.257+**；升级 Hermes 前先运行 `claude update`。缺少 Bun 时 `start` 会引导安装。对标依据、Claude 新功能适配和验证边界见 [可靠性评审](docs/AGENT_RELIABILITY_REVIEW.md)。
 
 如果这个 workspace 之前跑过上游的 Claw daemon，第一次 `start` 会把 `.claude/claudeclaw/` 一次性迁移到 `.claude/hermes/`，老目录原样留着当保险。
 
@@ -70,16 +70,19 @@ daemon 按频道名自动路由：
 - **DM** — 默认：per-user 记忆，每条都回。
 - **手动 override：** SQLite 里 `channel_policies` 的 per-channel 配置优先于按名字推断的默认值。
 
-### Discord 多 session 线程
+### Discord / Telegram 会话管理
 - **独立 thread session：** 每个 Discord thread 拿自己的 Claude CLI session。
 - **并行处理：** 不同 thread 里的消息互不阻塞。
 - **自动创建：** 一个新 thread 的第一条消息会 bootstrap 一个新 session。
-- **清理：** thread 被删或归档，对应的 session 也一起扔掉。
-- **向后兼容：** DM 和主频道消息还是走全局 session。
+- **生命周期：** 归档保留上下文；删除线程会清除其 SQLite session 和归属记忆。
+- **隔离：** 私聊按用户，服务器频道和群聊按频道中的用户，Telegram 话题按群 ID + 话题 ID 路由。
+- **控制命令：** `/reset`、`/compact`、`/status`、`/context` 都指向当前会话。重置保留长期记忆；升级后不会把旧全局历史自动分配给聊天用户。
 
 细节看 [docs/MULTI_SESSION.md](docs/MULTI_SESSION.md)。
 
 ### 可靠性与控制
+- **连接恢复：** Discord 心跳与 Resume 使用可取消的连接代次；Telegram 长轮询和重试可中止，并遵守 `retry_after`。
+- **结果不确定时：** 发送网络故障和任务超时会明确报错，不自动重放可能已有副作用的操作。
 - **Agentic 模型路由：** 每个 turn 按关键词/短语分类成 `planning`（→ Opus）或 `implementation`（→ Sonnet）。modes 在 `settings.json` 里可配；关掉就固定用单一模型。
 - **模型 fallback：** 主模型撞 rate limit 时，自动用备用模型重试（推荐用 GLM 换 provider path 更稳）。
 - **Security 级别：** 四档工具访问权限，全都是 headless（不会弹权限 prompt）：
@@ -143,3 +146,7 @@ MIT —— 见 [LICENSE](LICENSE)。
 - **`(SKILL.md + description + trajectory)` 结构 + FTS 检索的 skill 库** —— [Voyager](https://github.com/MineDojo/Voyager) 的 skill library 形状。
 - **importance · recency · relevance 打分** —— 斯坦福 Generative Agents 论文（[Park 等，2023](https://arxiv.org/abs/2304.03442)）。
 - **episodic / semantic 分层 + FTS5 当检索骨架** —— 思路上接近 [Zep](https://github.com/getzep/zep) 和 [mem0](https://github.com/mem0ai/mem0)，但砍掉了图 / 向量存储。
+
+### 主动记忆与新版 Claude
+
+每个 turn 先用 FTS5 检索相关旧消息，再注入近期上下文，检索范围限定在当前会话及有归属的事实。支持中文片段回退、检索数量和摘要长度预算。桥接会话各自使用 Claude 原生自动记忆目录，恢复会话时刷新系统提示。`memoryScope: none` 关闭自动记忆注入，但仍持久化成功的会话记录。项目文件、hooks、MCP 与 skills 仍属于受信任的共享工作区；这不是多租户沙箱。

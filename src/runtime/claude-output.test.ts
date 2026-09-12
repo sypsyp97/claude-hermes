@@ -71,3 +71,18 @@ describe("extractSessionAndResultFromText", () => {
     });
   });
 });
+
+test("extracts structured Claude result failures even without result text", () => {
+  const raw = JSON.stringify({
+    type: "result",
+    subtype: "error_max_turns",
+    is_error: true,
+    session_id: "s",
+    errors: ["Turn limit reached"],
+  });
+  expect(extractSessionAndResultFromText(raw)).toEqual({
+    sessionId: "s",
+    result: undefined,
+    error: "Turn limit reached",
+  });
+});

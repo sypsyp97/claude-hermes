@@ -56,13 +56,13 @@ describe("buildSecurityArgs — headless bypass follows the level", () => {
 });
 
 describe("buildSecurityArgs — level presets use the CLI-standard flags", () => {
-  test("locked → --allowedTools Read,Grep,Glob (not --tools)", () => {
+  test("locked limits available built-ins with --tools as well as approving read-only tools", () => {
     const args = buildSecurityArgs(cfg({ level: "locked" }));
     const idx = args.indexOf("--allowedTools");
     expect(idx).toBeGreaterThanOrEqual(0);
     expect(args[idx + 1]).toBe("Read,Grep,Glob");
-    // The non-standard `--tools` flag is gone.
-    expect(args).not.toContain("--tools");
+    // --allowedTools is an approval rule; --tools actually limits availability.
+    expect(args[args.indexOf("--tools") + 1]).toBe("Read,Grep,Glob");
   });
 
   test("strict → --disallowedTools Bash,WebSearch,WebFetch", () => {

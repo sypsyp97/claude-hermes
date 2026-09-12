@@ -50,9 +50,20 @@ export async function runClaudeStreaming(opts: StreamingOptions): Promise<Stream
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const killEscalationMs = opts.killEscalationMs ?? DEFAULT_KILL_ESCALATION_MS;
   const [bin, ...prefix] = claudeArgv({ override: opts.claudeBin, env: opts.env });
-  const args = [...prefix, ...opts.args, "--output-format", "stream-json", "--verbose"];
+  const args = [
+    ...prefix,
+    ...opts.args,
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+  ];
 
-  await opts.sink.open(opts.taskId, opts.label);
+  try {
+    await opts.sink.open(opts.taskId, opts.label);
+  } catch {
+    /* Best-effort status. */
+  }
 
   const started = Date.now();
   return new Promise<StreamingResult>((resolveOuter) => {
@@ -100,19 +111,27 @@ export async function runClaudeStreaming(opts: StreamingOptions): Promise<Stream
       }
     }
 
+    let pendingEvents = Promise.resolve();
     proc.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stdout += text;
-      void handleEvents(parser.push(text));
+      const events = parser.push(text);
+      pendingEvents = pendingEvents.then(() => handleEvents(events));
     });
     proc.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
     });
 
-    async function finalize(exitCode: number, ok: boolean): Promise<void> {
+    let finalized = false;
+    async function finalize(processExitCode: number, processOk: boolean): Promise<void> {
+      if (finalized) return;
+      finalized = true;
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
+      await pendingEvents;
       await handleEvents(parser.flush());
+      const ok = processOk && !errorShort;
+      const exitCode = errorShort ? processExitCode || 1 : processExitCode;
       const closeErrorShort = ok
         ? undefined
         : (errorShort ?? (stderr ? stderr.trim().slice(-200) : undefined));

@@ -28,7 +28,7 @@ Easiest path — install from the Claude Code plugin marketplace. Inside any Cla
 /claude-hermes:start
 ```
 
-The setup wizard walks you through model, heartbeat, Telegram, Discord, and security; the daemon then runs in the background. Bun is the only runtime dependency — `start` will offer to install it for you if it's missing.
+The setup wizard walks you through model, heartbeat, Telegram, Discord, and security; the daemon then runs in the background. Use Bun and Claude Code **2.1.257+** (`claude update` before upgrading). `start` offers to install Bun if missing. See the [Claude compatibility and reliability review](docs/AGENT_RELIABILITY_REVIEW.md).
 
 If you previously ran the upstream Claw daemon in this workspace, the first `start` migrates `.claude/claudeclaw/` → `.claude/hermes/` once and then leaves the legacy directory untouched as a safety net.
 
@@ -70,16 +70,19 @@ The daemon auto-routes channels by name:
 - **DMs** — default: per-user memory, reply to every message.
 - **Manual override:** per-channel `channel_policies` rows in SQLite win over the name-based default.
 
-### Multi-session threads (Discord)
+### Conversation sessions (Discord and Telegram)
 - **Independent thread sessions:** each Discord thread gets its own Claude CLI session.
 - **Parallel processing:** messages in different threads don't block each other.
 - **Auto-create:** the first message in a new thread bootstraps a fresh session.
-- **Cleanup:** thread sessions are dropped when the thread is deleted or archived.
-- **Backwards-compatible:** DMs and main-channel messages keep using the global session.
+- **Lifecycle:** archive retains context; deletion clears the thread's SQLite session and attributed facts.
+- **Isolation:** DMs use per-user sessions, server/group messages use per-channel-user sessions, and Telegram topics include their chat ID.
+- **Controls:** `/reset`, `/compact`, `/status` and `/context` address the current conversation. Reset retains long-term memory; old workspace history is not automatically shared into new bridge sessions.
 
 See [docs/MULTI_SESSION.md](docs/MULTI_SESSION.md) for the routing details.
 
 ### Reliability and control
+- **Connection recovery:** Discord heartbeat/resume recovery uses cancellable generations; Telegram uses abortable polling and bounded request retries that honor `retry_after`.
+- **Uncertain outcomes:** network send failures and timed-out tasks are surfaced without automatic replay.
 - **Agentic model routing:** classify each turn as `planning` (→ Opus) or `implementation` (→ Sonnet) by keyword/phrase. Modes are fully configurable in `settings.json`; disable to pin a single model.
 - **Model fallback:** if the primary model hits a rate limit, automatically retry on a backup model (prefer GLM for provider diversity).
 - **Security levels:** four tool-access tiers, all headless (no permission prompts):
@@ -99,7 +102,8 @@ Three layers, stable to volatile:
 
 - **Identity** — `prompts/{SOUL,IDENTITY,USER}.md` + project `CLAUDE.md` + per-workspace overrides in `.claude/hermes/memory/`. Byte-identical across turns so the CLI's prompt cache stays warm.
 - **Episodic** — `state.db` logs every successful turn to a `messages` table; FTS5 for search, a small importance heuristic + recency/relevance score for ranking.
-- **Runtime digest** — every Claude invocation injects a deterministic digest from `state.db` into the appended system prompt, so fresh sessions proactively see recent durable facts plus compact snippets from prior persisted conversations.
+- **Proactive recall** — every turn searches relevant older messages with FTS5 before adding recent context. Bridge recall uses the current conversation and attributed facts, with a bounded digest and CJK fallback.
+- **Native Claude memory** — each bridge conversation has its own auto-memory directory. Refreshed system prompts make new recall effective on resume. `memoryScope: none` disables automatic memory injection, while transcript persistence remains enabled.
 - **Primitives** — four opt-in or human-gated pieces, all wired into the runtime:
   - Labeled memory blocks in `.claude/hermes/memory/blocks/` land in the system prompt as `<block:NAME>…</block>`.
   - A scratchpad at `.claude/hermes/memory/agent/` with the six-op protocol (`view / create / strReplace / insert / del / rename`).

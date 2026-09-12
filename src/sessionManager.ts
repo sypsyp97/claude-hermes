@@ -87,10 +87,15 @@ export async function createThreadSession(
   });
 }
 
-/** Remove a thread session (e.g., on thread delete/archive). */
+/** Delete a removed thread and its attributed memory; archival retains context. */
 export async function removeThreadSession(source: ThreadSource, threadId: string): Promise<void> {
   const db = await getSharedDb();
-  deleteByKey(db, threadKey(source, threadId));
+  db.transaction(() => {
+    const row = getByKey(db, threadKey(source, threadId));
+    // ON DELETE SET NULL would turn scoped workspace facts into shared facts.
+    if (row) db.prepare("DELETE FROM memory_entries WHERE source_session_id = ?").run(row.id);
+    deleteByKey(db, threadKey(source, threadId));
+  })();
   // Also strip the entry from the legacy `sessions.json`. Otherwise the
   // importer that runs on every fresh shared-db open would re-insert the
   // just-deleted thread on the next daemon restart. The legacy file can't
