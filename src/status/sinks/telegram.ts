@@ -21,15 +21,21 @@ export interface TelegramStatusSinkOptions {
   chatId: number;
   threadId?: number;
   windowMs?: number;
+  preview?: boolean;
+  verbose?: boolean;
 }
 
 export function createTelegramStatusSink(opts: TelegramStatusSinkOptions): StatusSink {
   const { transport, chatId, threadId } = opts;
   let renderer: Renderer | null = null;
+  let closed = false;
+  let pendingEdit: Promise<void> = Promise.resolve();
   let messageId: number | null = null;
   let coalescer: Coalescer | null = null;
 
-  async function sendEdit(): Promise<void> {
+  function sendEdit(): Promise<void> {
+    pendingEdit = pendingEdit.then(async () => {
+      if (closed) return;
     if (messageId === null || !renderer) return;
     const content = renderer.render();
     try {
@@ -37,11 +43,14 @@ export function createTelegramStatusSink(opts: TelegramStatusSinkOptions): Statu
     } catch {
       // swallow
     }
+    });
+    return pendingEdit;
   }
 
   return {
     async open(_taskId, label) {
-      renderer = createRenderer(label);
+      closed = false;
+      renderer = createRenderer(label, undefined, {preview:opts.preview, verbose:opts.verbose});
       coalescer = createCoalescer(sendEdit, { windowMs: opts.windowMs });
       const initial = renderer.render();
       try {
@@ -59,7 +68,9 @@ export function createTelegramStatusSink(opts: TelegramStatusSinkOptions): Statu
     },
 
     async close(result: CloseResult) {
+      closed = true;
       if (coalescer) coalescer.dispose();
+      await pendingEdit;
       if (!renderer || messageId === null) return;
       const finalContent = renderer.renderFinal(result);
       try {

@@ -14,7 +14,7 @@ Claude Hermes turns your Claude Code into a personal assistant that never sleeps
 | Sessions | scope-based router (`dm`, `per-channel-user`, `per-thread`, `shared`, `workspace`) | global + per-thread overrides |
 | Skills | candidate → active with a rollback window (`shadow` on regression) | manual install only |
 | Self-evolution | human-triggered, verify-gated: auto-commits on green, reverts on red | none |
-| Model routing | agentic mode picks Opus for planning / Sonnet for implementation per message | single-model |
+| Model routing | agentic routing plus persisted per-conversation overrides | bridge-specific model selection |
 | Web dashboard | removed — talk to the daemon via Telegram/Discord/CLI | yes |
 | Verify pipeline | typecheck + lint + unit + smoke + integration, all five must be green | manual |
 
@@ -56,11 +56,19 @@ Then point Claude Code at the working tree:
 - **Scaffolder (`/claude-hermes:new`):** `new job <name>`, `new skill <name>`, or `new prompt <name>` writes a template file with sensible frontmatter so you don't hand-craft YAML. Runs as a CLI too: `bun run src/index.ts new job my-job --schedule "0 9 * * *"`.
 - **Self-evolution (`bun run scripts/evolve.ts`):** opt-in local tool that takes a task body (CLI arg or stdin or Discord/Telegram message), asks your local Claude to implement it, runs the full verify pipeline, and commits on green / `git restore`s on red. Small-step, verify-gated, journal-everything discipline. Human-triggered, not a cron — the verify gate is the safety net.
 
+### Job notification targets
+Job frontmatter accepts `notifyChannel: "DISCORD_CHANNEL_ID"`, `notifyTelegramChat: "TELEGRAM_CHAT_ID"` and optional `notifyTelegramTopic: 42`. You can specify both platforms. Explicit targets receive the result instead of the default recipient list; a missing transport or failed target never falls back to other recipients. Without these fields, the existing default forwarding remains. `notify: false` disables job progress and result notifications; `notify: error` sends only failed results. A topic requires a chat ID, and malformed targets reject the job during loading.
+
 ### Communication
-- **Telegram:** text, image, and voice (whisper.cpp or any OpenAI-compatible STT endpoint).
-- **Discord:** DMs, server mentions/replies, slash commands (`/start`, `/reset`), voice messages, image attachments, and reaction feedback.
+- **Telegram:** text, images, voice, generic documents (including JSON/source files and files without a MIME type), quoted replies and forwarded context. Referenced images/documents/audio are available as files. Voice transcription uses whisper.cpp or an OpenAI-compatible STT endpoint.
+- **Discord:** DMs, server mentions/replies, slash commands, voice messages, multiple images, generic files, reply/forward context and reaction feedback. A missing same-channel reply snapshot is fetched before checking whether it replies to the bot. System messages do not invoke Claude.
 - **Time-aware messages:** prefixes help the agent reason about delays and daily patterns.
-- **Real-time status sinks:** task progress is streamed back to whoever triggered it — Discord reactions, Telegram typing indicators, or terminal lines — so long-running `evolve` runs or heartbeat turns aren't silent.
+- **Live answer preview:** Telegram and Discord show a bounded draft in the progress message, then replace it with a completion summary and deliver the full final answer separately. `/verbose on` adds detailed tool progress; `/verbose off` keeps the compact preview. Settings persist per conversation.
+
+### Attachments
+Both bridges download files up to 20 MiB each. Discord handles up to ten files per message, prioritizing current attachments before referenced files and preserving filenames and origin labels. Download failures and omitted files are reported in the model context. Telegram albums remain separate ordered message updates. Archives are delivered as files; Hermes does not automatically extract them.
+
+Generated files are sent with `[send-file:/absolute/path]`. Claude receives the current conversation's outbox path in its system prompt: `.claude/hermes/outbox/<session-hash>/`. Each output must be a regular file inside that directory and at most 10 MiB; escaping symlinks and aliased outbox roots are rejected. Discord supports this for ordinary messages and skill slash commands. Existing Telegram skills that send files from arbitrary paths must copy outputs into the supplied outbox first. Platform limits may also reject an upload; ambiguous failures are surfaced without resending.
 
 ### Discord channel policies
 The daemon auto-routes channels by name:
@@ -68,7 +76,7 @@ The daemon auto-routes channels by name:
 - **`deliver-*`** — delivery-only, no interactive replies (use for broadcasts).
 - **Server channels** — default: per-channel-user memory, reply on mention/reply only.
 - **DMs** — default: per-user memory, reply to every message.
-- **Manual override:** per-channel `channel_policies` rows in SQLite win over the name-based default.
+- **Manual override:** per-channel `channel_policies` rows in SQLite win over the name-based default. Add `allowedUserIds: ["DISCORD_USER_ID"]` to a Discord guild-channel policy to authorize extra users only there. Threads inherit the parent policy unless explicitly overridden. Messages and slash commands share this check; a channel grant never authorizes a DM or another channel. An empty global list and no channel grant reject everyone. Creating/deleting threads through management messages requires a globally authorized user.
 
 ### Conversation sessions (Discord and Telegram)
 - **Independent thread sessions:** each Discord thread gets its own Claude CLI session.
@@ -76,7 +84,9 @@ The daemon auto-routes channels by name:
 - **Auto-create:** the first message in a new thread bootstraps a fresh session.
 - **Lifecycle:** archive retains context; deletion clears the thread's SQLite session and attributed facts.
 - **Isolation:** DMs use per-user sessions, server/group messages use per-channel-user sessions, and Telegram topics include their chat ID.
-- **Controls:** `/reset`, `/forget`, `/compact`, `/status` and `/context` address the current conversation. Reset retains memory; forget erases its Hermes history/facts and native auto-memory directory. Context capacity uses model-reported limits when available.
+- **Controls:** `/reset`, `/forget`, `/compact`, `/status` and `/context` address the current conversation. Reset retains memory; forget erases its Hermes history/facts and native auto-memory directory. Context capacity uses model-reported limits when available. Transcript lookup checks the active workspace first, then searches for the exact session UUID after a workspace move.
+- **Cancel:** `/cancel` (aliases `/kill`, `/stop`) immediately signals the active Claude task in this conversation, including a task waiting for a process slot. Other conversations and queued future messages remain intact. Attachment preparation and completed side effects are not undone.
+- **Model:** `/model sonnet`, `/model opus`, `/model haiku` or `/model <model-id>` persists a conversation override in SQLite; `/model` displays it, and `/model default` restores channel/global routing. Reset retains this setting.
 - **Channel policy:** both bridges enforce session/memory scope, delivery role, model selection, allowed skills and automatic threads (Telegram requires a forum group). Explicit shared scope remains shared when a thread is created.
 
 See [docs/MULTI_SESSION.md](docs/MULTI_SESSION.md) for the routing details.
@@ -143,6 +153,8 @@ MIT — see [LICENSE](LICENSE).
 ## Acknowledgements
 
 Started as a fork of [moazbuilds/claudeclaw](https://github.com/moazbuilds/claudeclaw); the shared-name files that remain (Telegram + Discord bridges, voice transcription, cron/heartbeat scaffolding) have since been rewritten from scratch against the test suite.
+
+The v1.1.0 bridge improvements adapt selected upstream features and open proposals to Hermes session isolation; see [release notes and upstream references](docs/releases/v1.1.0.md). Skill installation now searches the structured skills.sh API with a timeout and explicit error handling.
 
 The self-evolve cadence (small step, verify-gated, journal-everything) is lifted from [yologdev/yoyo-evolve](https://github.com/yologdev/yoyo-evolve).
 

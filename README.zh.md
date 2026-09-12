@@ -14,7 +14,7 @@ Claude Hermes 把你的 Claude Code 变成一个不睡觉的个人助理：后�
 | Session | 按 scope 路由（`dm`, `per-channel-user`, `per-thread`, `shared`, `workspace`） | 全局 session + per-thread 覆盖 |
 | Skills | candidate → active，带 rollback 窗口（回退时落到 `shadow`） | 只能手动装 |
 | 自我进化 | 人触发 + verify 把关：绿了自动 commit，红了 revert | 无 |
-| 模型路由 | agentic 模式按每条消息挑 Opus 做 planning / Sonnet 做 implementation | 单模型 |
+| 模型路由 | agentic 路由 + 持久化的会话级模型覆盖 | 各桥接分别选择模型 |
 | Web dashboard | 砍掉了 — 只走 Telegram/Discord/CLI | 有 |
 | Verify pipeline | typecheck + lint + unit + smoke + integration，五个全绿才算过 | 手动 |
 
@@ -56,11 +56,19 @@ bun run verify
 - **Scaffolder（`/claude-hermes:new`）：** `new job <name>`、`new skill <name>`、`new prompt <name>` 会用合理的 frontmatter 默认值生成模板文件，不用手搓 YAML。也能当 CLI 用：`bun run src/index.ts new job my-job --schedule "0 9 * * *"`。
 - **自我进化（`bun run scripts/evolve.ts`）：** 可选的本地工具。你丢一段任务描述（CLI 参数、stdin 或 Discord/Telegram 消息），它让本地 Claude 去实现，全套 verify 跑完，绿了 commit、红了 `git restore`。小步走、verify 把关、全程写 journal。完全人触发，没有 cron — verify 就是安全网。
 
+### 定时任务通知目标
+job frontmatter 支持 `notifyChannel: "DISCORD_CHANNEL_ID"`、`notifyTelegramChat: "TELEGRAM_CHAT_ID"` 和可选的 `notifyTelegramTopic: 42`，可同时指定两个平台。指定后只向这些目标投递，目标失败或桥接未启用时不会改发其他人。省略这些字段时保留原有默认投递。`notify: false` 关闭任务进度与结果通知，`notify: error` 只发送失败结果。topic 必须同时指定 chat，目标格式错误会在加载时拒绝该 job。
+
 ### 通信
-- **Telegram：** 支持文字、图片、语音（whisper.cpp 或任意 OpenAI 兼容的 STT endpoint）。
-- **Discord：** DM、服务器 @mention/reply、slash 命令（`/start`、`/reset`）、语音消息、图片附件、reaction 反馈。
+- **Telegram：** 支持文字、图片、语音、通用文档（含 JSON、源码和无 MIME 文件），以及引用回复、转发上下文。被引用的图片、文档和音频以文件形式提供。语音识别使用 whisper.cpp 或 OpenAI 兼容 STT endpoint。
+- **Discord：** DM、服务器 @mention/reply、slash 命令、语音、多图、通用附件、回复/转发上下文和 reaction。同频道引用快照缺失时，先补取原消息再判断回复触发；系统消息不会调用 Claude。
 - **时间感知：** 消息里带时间戳前缀，帮 agent 理解延迟和日常节奏。
-- **实时 status sink：** 任务进度会实时推给触发它的人 — Discord 加 reaction、Telegram 发 typing、terminal 打日志 — 跑得慢的 `evolve` 或 heartbeat turn 不会哑巴。
+- **实时答案预览：** Telegram 和 Discord 在进度消息中展示有长度限制的回答草稿；完成后将其收为状态摘要，完整答案单独发送。`/verbose on` 显示详细工具进度，`/verbose off` 保留简洁预览，设置按会话持久化。
+
+### 附件
+两个桥接每个入站文件最多下载 20 MiB。Discord 每条消息最多处理十个文件，当前消息优先于引用附件，并保留原始文件名和来源。下载失败、超出数量的文件会明确写入模型上下文。Telegram 相册仍按多条有序消息处理。压缩包作为文件交给 Claude，Hermes 不自动解压。
+
+生成文件通过 `[send-file:/绝对路径]` 发送。系统提示会告诉 Claude 当前会话的输出目录：`.claude/hermes/outbox/<session-hash>/`。每个输出必须是该目录内的普通文件，最多 10 MiB；拒绝越界符号链接及指向其他目录的 outbox。Discord 的普通消息和 skill slash 命令都支持发送。原有 Telegram skill 若从任意路径发文件，需要先复制到提供的 outbox。平台也可能有额外限制；发送结果不确定时不会自动重发。
 
 ### Discord 频道策略
 daemon 按频道名自动路由：
@@ -68,7 +76,7 @@ daemon 按频道名自动路由：
 - **`deliver-*`** — 只投递，不交互回复（适合广播）。
 - **普通服务器频道** — 默认：per-channel-user 记忆，只在被 @mention 或 reply 时回。
 - **DM** — 默认：per-user 记忆，每条都回。
-- **手动 override：** SQLite 里 `channel_policies` 的 per-channel 配置优先于按名字推断的默认值。
+- **手动 override：** SQLite 里 `channel_policies` 的频道配置优先于名称规则。Discord 服务器频道的策略中可加入 `allowedUserIds: ["DISCORD_USER_ID"]`，仅授权这些用户在该频道使用；线程继承父频道，显式覆盖优先。普通消息和 slash 命令共用授权判断；频道授权不会扩展到私聊或其他频道。全局列表为空且没有频道授权时拒绝访问。通过管理消息创建或删除线程需要全局用户授权。
 
 ### Discord / Telegram 会话管理
 - **独立 thread session：** 每个 Discord thread 拿自己的 Claude CLI session。
@@ -76,7 +84,9 @@ daemon 按频道名自动路由：
 - **自动创建：** 一个新 thread 的第一条消息会 bootstrap 一个新 session。
 - **生命周期：** 归档保留上下文；删除线程会清除其 SQLite session 和归属记忆。
 - **隔离：** 私聊按用户，服务器频道和群聊按频道中的用户，Telegram 话题按群 ID + 话题 ID 路由。
-- **控制命令：** `/reset`、`/forget`、`/compact`、`/status`、`/context` 都指向当前会话。重置保留记忆；遗忘会删除该会话的 Hermes 历史、事实和原生 auto-memory。上下文容量优先使用模型报告值，缺失时明确显示未知。
+- **控制命令：** `/reset`、`/forget`、`/compact`、`/status`、`/context` 都指向当前会话。重置保留记忆；遗忘会删除该会话的 Hermes 历史、事实和原生 auto-memory。上下文容量优先使用模型报告值，缺失时明确显示未知。会话文件优先从当前工作区定位，移动目录后按精确 session UUID 回查。
+- **取消任务：** `/cancel`（别名 `/kill`、`/stop`）立即通知当前会话正在执行或等待进程名额的 Claude 任务停止，其他会话与后续排队消息继续保留。附件准备和已发生的操作不会被撤销。
+- **切换模型：** `/model sonnet`、`/model opus`、`/model haiku` 或 `/model <model-id>` 将当前会话的模型覆盖写入 SQLite；`/model` 查看，`/model default` 恢复频道/全局路由。重置会话会保留该设置。
 - **频道策略：** 两个桥接都执行 session/memory scope、投递模式、模型和技能限制、自动建线程策略（Telegram 需要论坛群）。自动建线程与后续消息使用一致的策略，显式共享模式保持共享。
 
 细节看 [docs/MULTI_SESSION.md](docs/MULTI_SESSION.md)。
@@ -143,6 +153,8 @@ MIT —— 见 [LICENSE](LICENSE)。
 ## 致谢
 
 最初 fork 自 [moazbuilds/claudeclaw](https://github.com/moazbuilds/claudeclaw)；遗留同名文件（Telegram/Discord bridge、语音转写、cron/heartbeat 骨架）已经针对测试从零重写过。
+
+v1.1.0 将选定的上游功能及开放 PR 提案适配到 Hermes 的会话隔离机制，来源见 [发布说明](docs/releases/v1.1.0.md)。技能安装搜索改用 skills.sh 结构化 API，并加入超时和明确错误处理。
 
 自我进化的节奏（小步走、verify 把关、全程写 journal）借自 [yologdev/yoyo-evolve](https://github.com/yologdev/yoyo-evolve)。
 

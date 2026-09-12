@@ -19,6 +19,7 @@ export interface SlashCommandSpec {
   description: string;
   /** Discord APPLICATION_COMMAND_TYPE.CHAT_INPUT */
   type: 1;
+  options?: Array<{name: string; description: string; type: 3; required?: boolean; choices?: Array<{name: string; value: string}>}>;
 }
 
 const DISCORD_COMMAND_LIMIT = 100;
@@ -56,6 +57,12 @@ export const HARDCODED_COMMANDS: SlashCommandSpec[] = [
     description: "Show context window usage",
     type: 1,
   },
+  {name:"cancel", description:"Stop this conversation's active task", type:1},
+  {name:"kill", description:"Alias for cancel", type:1},
+  {name:"stop", description:"Alias for cancel", type:1},
+  {name:"model", description:"Show or change this conversation's model", type:1, options:[{name:"model",description:"default, sonnet, opus, haiku, or a model ID",type:3}]},
+  {name:"verbose", description:"Show or change detailed progress", type:1, options:[{name:"mode",description:"Detailed tool progress",type:3,choices:[{name:"on",value:"on"},{name:"off",value:"off"}]}]},
+
 ];
 
 function slugifyCommandName(raw: string): string {

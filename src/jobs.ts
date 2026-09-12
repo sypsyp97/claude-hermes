@@ -9,6 +9,9 @@ export interface Job {
   prompt: string;
   recurring: boolean;
   notify: true | false | "error";
+  notifyChannel?: string;
+  notifyTelegramChat?: number;
+  notifyTelegramTopic?: number;
 }
 
 function parseFrontmatterValue(raw: string): string {
@@ -58,7 +61,24 @@ function parseJobFile(name: string, content: string): Job | null {
     : notifyRaw === "error" ? "error"
     : true;
 
-  return { name, schedule, prompt, recurring, notify };
+  const field = (key: string) => {
+    const line = lines.find(l => l.startsWith(`${key}:`));
+    return line === undefined ? undefined : parseFrontmatterValue(line.slice(key.length + 1));
+  };
+  const channel = field("notifyChannel");
+  const chat = field("notifyTelegramChat");
+  const topic = field("notifyTelegramTopic");
+  if ((channel !== undefined && !/^[1-9]\d{0,19}$/.test(channel)) ||
+      (chat !== undefined && (!/^-?[1-9]\d*$/.test(chat) || !Number.isSafeInteger(Number(chat)))) ||
+      (topic !== undefined && (chat === undefined || !/^[1-9]\d*$/.test(topic) || !Number.isSafeInteger(Number(topic))))) {
+    console.error(`Skipping job ${name}: invalid notification target`);
+    return null;
+  }
+  return { name, schedule, prompt, recurring, notify,
+    ...(channel === undefined ? {} : {notifyChannel:channel}),
+    ...(chat === undefined ? {} : {notifyTelegramChat:Number(chat)}),
+    ...(topic === undefined ? {} : {notifyTelegramTopic:Number(topic)}),
+  };
 }
 
 export async function loadJobs(): Promise<Job[]> {

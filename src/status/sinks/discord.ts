@@ -23,6 +23,8 @@ export interface DiscordStatusSinkOptions {
   transport: DiscordTransport;
   channelId: string;
   windowMs?: number;
+  preview?: boolean;
+  verbose?: boolean;
   heartbeatMs?: number;
 }
 
@@ -32,11 +34,15 @@ export function createDiscordStatusSink(opts: DiscordStatusSinkOptions): StatusS
   const { transport, channelId } = opts;
   const heartbeatMs = opts.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   let renderer: Renderer | null = null;
+  let closed = false;
+  let pendingEdit: Promise<void> = Promise.resolve();
   let messageId: string | null = null;
   let coalescer: Coalescer | null = null;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
-  async function sendPatch(): Promise<void> {
+  function sendPatch(): Promise<void> {
+    pendingEdit = pendingEdit.then(async () => {
+      if (closed) return;
     if (!messageId || !renderer) return;
     const content = renderer.render();
     try {
@@ -44,6 +50,8 @@ export function createDiscordStatusSink(opts: DiscordStatusSinkOptions): StatusS
     } catch {
       // swallow — status display is best-effort
     }
+    });
+    return pendingEdit;
   }
 
   function stopHeartbeat(): void {
@@ -59,7 +67,7 @@ export function createDiscordStatusSink(opts: DiscordStatusSinkOptions): StatusS
     const timer = setInterval(() => {
       // Fire-and-forget; sendPatch swallows its own errors, but guard the
       // synchronous portion too so a throw can't escape the timer callback.
-      void sendPatch().catch(() => {});
+      coalescer?.schedule();
     }, heartbeatMs);
     const maybeUnref = (timer as { unref?: () => void }).unref;
     if (typeof maybeUnref === "function") {
@@ -70,7 +78,8 @@ export function createDiscordStatusSink(opts: DiscordStatusSinkOptions): StatusS
 
   return {
     async open(_taskId, label) {
-      renderer = createRenderer(label);
+      closed = false;
+      renderer = createRenderer(label, undefined, {preview:opts.preview, verbose:opts.verbose});
       coalescer = createCoalescer(sendPatch, { windowMs: opts.windowMs });
       const initial = renderer.render();
       try {
@@ -91,8 +100,10 @@ export function createDiscordStatusSink(opts: DiscordStatusSinkOptions): StatusS
     },
 
     async close(result: CloseResult) {
+      closed = true;
       stopHeartbeat();
       if (coalescer) coalescer.dispose();
+      await pendingEdit;
       if (!renderer || !messageId) return;
       const finalContent = renderer.renderFinal(result);
       try {

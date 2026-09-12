@@ -1,3 +1,4 @@
+import { deliverJobResult } from "../runtime/job-delivery";
 import { mkdir, unlink, writeFile } from "fs/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "url";
@@ -585,7 +586,7 @@ export async function start(args: string[] = []) {
   const daemonStartedAt = Date.now();
 
   // --- Telegram ---
-  let telegramSend: ((chatId: number, text: string) => Promise<void>) | null = null;
+  let telegramSend: ((chatId: number, text: string, topic?: number) => Promise<void>) | null = null;
   let telegramToken = "";
   let telegramStopPolling: (() => void) | null = null;
 
@@ -594,7 +595,7 @@ export async function start(args: string[] = []) {
       const { startPolling, sendMessage, stopPolling } = await import("./telegram");
       telegramStopPolling = stopPolling;
       startPolling(debugFlag);
-      telegramSend = (chatId, text) => sendMessage(token, chatId, text);
+      telegramSend = (chatId, text, topic) => sendMessage(token, chatId, text, topic);
       telegramToken = token;
       console.log(`[${ts()}] Telegram: enabled`);
     } else if (!token && telegramToken) {
@@ -897,13 +898,15 @@ export async function start(args: string[] = []) {
             console.log(`[${ts()}] Cleared schedule for one-time job: ${name}`);
           },
           onForward: (label, r) => {
-            forwardToTelegram(label, r);
-            forwardToDiscord(label, r);
+            void deliverJobResult(job, r, {
+              discord: discordSendToChannel, telegram: telegramSend,
+              defaults: () => { forwardToTelegram(label, r); forwardToDiscord(label, r); },
+            }).catch(err => console.error(`[${ts()}] Job ${job.name} notification failed: ${err}`));
           },
           onError: (err) => {
             console.error(`[${ts()}] Job ${job.name} failed:`, err);
           },
-          makeSink: (name) => createJobStatusSink(name, currentSettings),
+          makeSink: (name) => job.notify === true ? createJobStatusSink(name, currentSettings, job) : undefined,
         });
       } catch (err) {
         console.error(`[${ts()}] Cron tick error for ${job.name}:`, err);

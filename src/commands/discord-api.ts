@@ -27,8 +27,8 @@ export async function discordApi<T>(token: string, method: string, endpoint: str
     try {
       return await requestWithTimeout(`${DISCORD_API}${endpoint}`, {
         method,
-        headers: { Authorization: `Bot ${token}`, "Content-Type": "application/json" },
-        body: body === undefined ? undefined : JSON.stringify(body),
+        headers: { Authorization: `Bot ${token}`, ...(body instanceof FormData ? {} : { "Content-Type": "application/json" }) },
+        body: body instanceof FormData ? body : body === undefined ? undefined : JSON.stringify(body),
       }, async (response) => {
         if (response.status === 204) return undefined as T;
         const text = await response.text();
