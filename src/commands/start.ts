@@ -587,15 +587,18 @@ export async function start(args: string[] = []) {
   // --- Telegram ---
   let telegramSend: ((chatId: number, text: string) => Promise<void>) | null = null;
   let telegramToken = "";
+  let telegramStopPolling: (() => void) | null = null;
 
   async function initTelegram(token: string) {
     if (token && token !== telegramToken) {
-      const { startPolling, sendMessage } = await import("./telegram");
+      const { startPolling, sendMessage, stopPolling } = await import("./telegram");
+      telegramStopPolling = stopPolling;
       startPolling(debugFlag);
       telegramSend = (chatId, text) => sendMessage(token, chatId, text);
       telegramToken = token;
       console.log(`[${ts()}] Telegram: enabled`);
     } else if (!token && telegramToken) {
+      telegramStopPolling?.(); telegramStopPolling = null;
       telegramSend = null;
       telegramToken = "";
       console.log(`[${ts()}] Telegram: disabled`);

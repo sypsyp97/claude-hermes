@@ -1,19 +1,14 @@
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import { existsSync } from "fs";
-import { getSession, createSession, incrementTurn, markCompactWarned } from "./sessions";
-import {
-  createThreadSession,
-  getThreadSession,
-  incrementThreadTurn,
-  markThreadCompactWarned,
-  type ThreadSource,
-} from "./sessionManager";
+import { claudeSessionArgs, sessionAccess, type SessionInput, type SessionTarget } from "./runtime/session-target";
+import { type ThreadSource } from "./sessionManager";
 import { getSettings, type ModelConfig, type SecurityConfig } from "./config";
 import { buildClockPromptPrefix } from "./timezone";
 import { selectModel } from "./model-router";
 import { claudeArgv } from "./runtime/claude-cli";
-import { createStreamParser, type StatusEvent } from "./status/stream";
+import { runClaudeStreaming } from "./runtime/claude-stream";
+import { runProcess } from "./runtime/process";
 import type { StatusSink } from "./status/sink";
 import {
   LEGACY_MANAGED_BLOCK_END,
@@ -25,12 +20,14 @@ import {
   projectClaudeMdFile,
   promptsDir,
 } from "./paths";
-import { threadKey, workspaceKey } from "./router/session-key";
+import { threadKey } from "./router/session-key";
 import { composeSystemPrompt } from "./memory/compose";
 import { buildRuntimeMemoryDigest } from "./memory/runtime-digest";
+import { nudgeAndPersist } from "./memory/nudge";
+import type { MemoryScope } from "./policy/channel";
 import { readAllBlocks } from "./memory/blocks";
 import { getSharedDb } from "./state/shared-db";
-import { upsertSession } from "./state/repos/sessions";
+import { upsertSession, type SessionRow } from "./state/repos/sessions";
 import { appendMessage } from "./state/repos/messages";
 import { captureCandidateSkill } from "./learning/completion-hook";
 import { createToolCollector } from "./learning/tool-collector";
@@ -48,10 +45,8 @@ const HEARTBEAT_PROMPT_FILE = join(PROMPTS_DIR, "heartbeat", "HEARTBEAT.md");
 /**
  * Compact configuration.
  * COMPACT_WARN_THRESHOLD: notify user that context is getting large.
- * COMPACT_TIMEOUT_ENABLED: whether to auto-compact on timeout (exit 124).
  */
 const COMPACT_WARN_THRESHOLD = 25;
-const COMPACT_TIMEOUT_ENABLED = true;
 
 export type CompactEvent =
   | { type: "warn"; turnCount: number }
@@ -84,16 +79,9 @@ const RATE_LIMIT_PATTERN = /you.ve hit your limit|out of extra usage/i;
 // Serial queue — prevents concurrent --resume on the same session
 // Global queue for non-thread messages (backward compatible)
 let globalQueue: Promise<unknown> = Promise.resolve();
-// Per-thread queues — each thread runs independently in parallel.
-// The key is `<source>:<threadId>` to match the session-key contract in
-// router/session-key.ts. Keying on bare threadId would force two bridges
-// that happen to mint the same string (a Discord channel id and a Telegram
-// chat id) onto the same serial lane — pure incidental contention.
-const threadQueues = new Map<string, Promise<unknown>>();
-
-function queueKey(threadId: string, source: ThreadSource): string {
-  return `${source}:${threadId}`;
-}
+// Independent conversations run in parallel. Canonical keys include the
+// source so bridges cannot accidentally share a lane.
+const threadQueues = new Map<string, { tail: Promise<unknown>; target: SessionTarget }>();
 
 /**
  * Persist a single user→assistant turn to the SQLite messages store.
@@ -110,9 +98,14 @@ async function persistTurn(opts: {
   scope: string;
   workspace: string;
   thread?: string;
+  guild?: string;
+  channel?: string;
+  user?: string;
   claudeSessionId: string;
   userPrompt: string;
   assistantReply: string;
+  userText?: string;
+  memoryScope?: MemoryScope;
 }): Promise<void> {
   try {
     const db = await getSharedDb(opts.cwd);
@@ -122,34 +115,43 @@ async function persistTurn(opts: {
       source: opts.source,
       workspace: opts.workspace,
       thread: opts.thread ?? null,
+      guild: opts.guild,
+      channel: opts.channel,
+      user: opts.user,
       claudeSessionId: opts.claudeSessionId,
     });
-    appendMessage(db, {
-      sessionId: sessionRow.id,
-      role: "user",
-      content: opts.userPrompt,
-    });
-    appendMessage(db, {
-      sessionId: sessionRow.id,
-      role: "assistant",
-      content: opts.assistantReply,
+    db.transaction(() => {
+      appendMessage(db, {
+        sessionId: sessionRow.id,
+        role: "user",
+        content: opts.userPrompt,
+      });
+      appendMessage(db, {
+        sessionId: sessionRow.id,
+        role: "assistant",
+        content: opts.assistantReply,
+      });
+    })();
+    if (opts.userText) await nudgeAndPersist([{role:"user", content:opts.userText}], {
+      cwd: opts.cwd, sourceSessionId: sessionRow.id, memoryScope: opts.memoryScope,
     });
   } catch (e) {
     console.error(`[${new Date().toLocaleTimeString()}] Failed to persist turn to messages store:`, e);
   }
 }
 
-function enqueue<T>(fn: () => Promise<T>, threadId?: string, source: ThreadSource = "cli"): Promise<T> {
+function enqueue<T>(fn: () => Promise<T>, threadId?: SessionInput, source: ThreadSource = "cli"): Promise<T> {
   if (threadId) {
-    const key = queueKey(threadId, source);
-    const current = threadQueues.get(key) ?? Promise.resolve();
+    const key = typeof threadId === "object" ? threadId.key : threadKey(source, threadId);
+    const current = threadQueues.get(key)?.tail ?? Promise.resolve();
     const task = current.then(fn, fn);
     const tracked = task.catch(() => {});
-    threadQueues.set(key, tracked);
+    const entry = { tail: tracked, target: sessionAccess(threadId, source).target };
+    threadQueues.set(key, entry);
     // Once this task settles, drop the entry if it is still the tail of the
     // queue. Otherwise a newer task has already landed and owns the slot.
     void tracked.finally(() => {
-      if (threadQueues.get(key) === tracked) {
+      if (threadQueues.get(key) === entry) {
         threadQueues.delete(key);
       }
     });
@@ -181,14 +183,6 @@ function extractRateLimitMessage(stdout: string, stderr: string): string | null 
     if (trimmed && RATE_LIMIT_PATTERN.test(trimmed)) return trimmed;
   }
   return null;
-}
-
-function sameModelConfig(a: ModelConfig, b: ModelConfig): boolean {
-  return a.model.trim().toLowerCase() === b.model.trim().toLowerCase() && a.api.trim() === b.api.trim();
-}
-
-function hasModelConfig(value: ModelConfig): boolean {
-  return value.model.trim().length > 0 || value.api.trim().length > 0;
 }
 
 function isNotFoundError(error: unknown): boolean {
@@ -226,54 +220,8 @@ async function runClaudeOnce(
   const args = [...baseArgs];
   const normalizedModel = model.trim().toLowerCase();
   if (model.trim() && normalizedModel !== "glm") args.push("--model", model.trim());
-
-  const proc = Bun.spawn(args, {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: buildChildEnv(baseEnv, model, api),
-  });
-
-  // The timeout timer must be cleared on success — otherwise it keeps the
-  // event loop alive (`claude-hermes send` would hang for the full
-  // CLAUDE_TIMEOUT_MS after the child has already exited cleanly).
-  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(
-      () => reject(new Error(`Claude session timed out after ${timeoutMs / 1000}s`)),
-      timeoutMs
-    );
-  });
-
-  try {
-    const [rawStdout, stderr] = (await Promise.race([
-      Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]),
-      timeoutPromise,
-    ])) as [string, string];
-    await proc.exited;
-
-    return {
-      rawStdout,
-      stderr,
-      exitCode: proc.exitCode ?? 1,
-    };
-  } catch (err) {
-    // Kill the hung process. Use unref() on the SIGKILL fallback so it
-    // doesn't itself keep the event loop alive after the function returns.
-    try { proc.kill("SIGTERM"); } catch {}
-    const killTimer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 5000);
-    if (typeof killTimer.unref === "function") killTimer.unref();
-
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[${new Date().toLocaleTimeString()}] ${message}`);
-
-    return {
-      rawStdout: "",
-      stderr: message,
-      exitCode: 124,
-    };
-  } finally {
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-  }
+  const result = await runProcess(args,{env:buildChildEnv(baseEnv,model,api),timeoutMs});
+  return {rawStdout:result.stdout,stderr:result.stderr,exitCode:result.exitCode};
 }
 
 /**
@@ -305,124 +253,19 @@ async function runClaudeOnceStreaming(
   finalResult?: string;
   toolCalls?: TrajectoryToolCall[];
 }> {
-  const args = [...baseArgs, "--output-format", "stream-json", "--verbose"];
+  const args = baseArgs.slice(claudeArgv().length);
   const normalizedModel = model.trim().toLowerCase();
   if (model.trim() && normalizedModel !== "glm") args.push("--model", model.trim());
-
-  await sink.open(taskId, taskLabel);
-
-  const proc = Bun.spawn(args, {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: buildChildEnv(baseEnv, model, api),
-  });
-
   const collector = createToolCollector();
-
-  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(
-      () => reject(new Error(`Claude session timed out after ${timeoutMs / 1000}s`)),
-      timeoutMs,
-    );
+  const result = await runClaudeStreaming({
+    args, cwd:process.cwd(), env:buildChildEnv(baseEnv, model, api),
+    timeoutMs, sink, taskId, label:taskLabel,
+    onEvent: event => collector.handleEvent(event),
   });
-
-  const parser = createStreamParser();
-  let rawStdout = "";
-  let sessionId: string | undefined;
-  let finalResult: string | undefined;
-  let errorShort: string | undefined;
-
-  async function handleEvents(events: StatusEvent[]): Promise<void> {
-    for (const event of events) {
-      if (event.kind === "task_start") {
-        sessionId = event.sessionId ?? sessionId;
-      } else if (event.kind === "task_complete") {
-        sessionId = event.sessionId ?? sessionId;
-        finalResult = event.result;
-      } else if (event.kind === "error") {
-        errorShort = event.message;
-      }
-      // Collect tool-use trajectory OUTSIDE the sink try/catch: a sink throw
-      // must never skip collection, since the learning loop relies on this
-      // list for SKILL.md bodies.
-      collector.handleEvent(event);
-      try {
-        await sink.update(event);
-      } catch {
-        // sink failures must never kill the Claude process
-      }
-    }
-  }
-
-  const readStdout = async (): Promise<void> => {
-    const reader = proc.stdout.getReader();
-    const decoder = new TextDecoder();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        rawStdout += chunk;
-        await handleEvents(parser.push(chunk));
-      }
-      const tail = decoder.decode();
-      if (tail) {
-        rawStdout += tail;
-        await handleEvents(parser.push(tail));
-      }
-      await handleEvents(parser.flush());
-    } finally {
-      reader.releaseLock();
-    }
+  return {
+    rawStdout:result.stdout, stderr:result.stderr, exitCode:result.exitCode,
+    sessionId:result.sessionId, finalResult:result.finalResult, toolCalls:collector.toolCalls(),
   };
-
-  try {
-    const [, stderr] = (await Promise.race([
-      Promise.all([readStdout(), new Response(proc.stderr).text()]),
-      timeoutPromise,
-    ])) as [void, string];
-    await proc.exited;
-    const exitCode = proc.exitCode ?? 1;
-    const ok = exitCode === 0;
-    try {
-      const closeResult: { ok: boolean; finalText?: string; errorShort?: string } = { ok };
-      if (finalResult !== undefined) closeResult.finalText = finalResult;
-      if (!ok && (errorShort ?? stderr)) closeResult.errorShort = errorShort ?? stderr.trim().slice(-200);
-      await sink.close(closeResult);
-    } catch {
-      // close failures must not mask the task result
-    }
-    const out: {
-      rawStdout: string;
-      stderr: string;
-      exitCode: number;
-      sessionId?: string;
-      finalResult?: string;
-      toolCalls?: TrajectoryToolCall[];
-    } = { rawStdout, stderr, exitCode, toolCalls: collector.toolCalls() };
-    if (sessionId !== undefined) out.sessionId = sessionId;
-    if (finalResult !== undefined) out.finalResult = finalResult;
-    return out;
-  } catch (err) {
-    try { proc.kill("SIGTERM"); } catch {}
-    const killTimer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 5000);
-    if (typeof killTimer.unref === "function") killTimer.unref();
-    const message = err instanceof Error ? err.message : String(err);
-    try {
-      await sink.close({ ok: false, errorShort: message });
-    } catch {
-      // swallow
-    }
-    return {
-      rawStdout: "",
-      stderr: message,
-      exitCode: 124,
-      toolCalls: collector.toolCalls(),
-    };
-  } finally {
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-  }
 }
 
 /**
@@ -514,7 +357,7 @@ export async function ensureProjectClaudeMd(): Promise<void> {
  *    depending on the flag, which is exactly the kind of silent-failure we
  *    are trying to remove.
  *  - `level` provides the default tool surface for each posture:
- *     locked     → `--allowedTools Read,Grep,Glob`
+ *     locked     → `--tools Read,Grep,Glob` plus read-only approval rules
  *     strict     → `--disallowedTools Bash,WebSearch,WebFetch`
  *     moderate   → no tool constraint (directory scope comes from the
  *                  system prompt the caller already appends)
@@ -535,7 +378,9 @@ export function buildSecurityArgs(security: SecurityConfig): string[] {
 
   switch (security.level) {
     case "locked":
+      args.push("--tools", "Read,Grep,Glob");
       args.push("--allowedTools", "Read,Grep,Glob");
+      args.push("--disallowedTools", "mcp__*");
       break;
     case "strict":
       args.push("--disallowedTools", "Bash,WebSearch,WebFetch");
@@ -661,10 +506,50 @@ export async function runCompact(
  * around the underlying runCompact call so Discord/Telegram users can see
  * live status. Sink calls are best-effort and never fail compact.
  */
-export async function compactCurrentSession(
-  opts?: { sink?: StatusSink },
+export function resetCurrentSession(opts?: { target?: SessionInput; source?: ThreadSource }): Promise<void> {
+  return enqueue(() => sessionAccess(opts?.target, opts?.source).reset(), opts?.target, opts?.source);
+}
+
+export function forgetCurrentSession(target: SessionInput): Promise<void> {
+  return enqueue(() => sessionAccess(target).forget(), target);
+}
+
+/** Wait for admitted turns before deleting a thread so completion cannot recreate it. */
+export async function deleteThreadSession(source: ThreadSource, threadId: string): Promise<void> {
+  const canonical = sessionAccess(threadId, source).target;
+  const targets = new Map([[canonical.key, canonical]]);
+  const ownedByThread = (target: Pick<SessionTarget, "source" | "scope" | "thread" | "channel">) =>
+    target.source === source && (
+      (target.scope === "per-thread" && target.thread === threadId) ||
+      (source === "discord" && ["shared", "per-channel-user"].includes(target.scope) && target.channel === threadId)
+    );
+  // A first turn may not have a DB row yet. Keep its target alongside the lane
+  // so deletion waits for it and cannot race a late session/memory write.
+  for (const { target } of threadQueues.values()) if (ownedByThread(target)) targets.set(target.key, target);
+  const db = await getSharedDb();
+  for (const row of db.query<SessionRow, [string, string, string]>(
+    "SELECT * FROM sessions WHERE source = ? AND (thread = ? OR channel = ?)"
+  ).all(source, threadId, threadId)) {
+    const target: SessionTarget = {
+      key: row.key, source, scope: row.scope as SessionTarget["scope"], workspace: row.workspace,
+      thread: row.thread ?? undefined, channel: row.channel ?? undefined, memoryScope: "none",
+    };
+    if (ownedByThread(target)) targets.set(target.key, target);
+  }
+  await Promise.all([...targets.values()].map(target =>
+    enqueue(() => sessionAccess(target).forget(), target, source)
+  ));
+}
+
+export function compactCurrentSession(opts?: { sink?: StatusSink; target?: SessionInput; source?: ThreadSource }): Promise<{ success: boolean; message: string }> {
+  return enqueue(() => compactSession(opts), opts?.target, opts?.source);
+}
+
+async function compactSession(
+  opts?: { sink?: StatusSink; target?: SessionInput; source?: ThreadSource },
 ): Promise<{ success: boolean; message: string }> {
-  const existing = await getSession();
+  const session = sessionAccess(opts?.target, opts?.source);
+  const existing = await session.get();
   if (!existing) return { success: false, message: "No active session to compact." };
 
   const sink = opts?.sink;
@@ -683,10 +568,10 @@ export async function compactCurrentSession(
 
   const ok = await runCompact(
     existing.sessionId,
-    settings.model,
+    session.target.policy?.modelPolicy?.model ?? settings.model,
     settings.api,
     baseEnv,
-    securityArgs,
+    [...securityArgs, ...(session.scoped ? claudeSessionArgs(session.target) : [])],
     timeoutMs
   );
 
@@ -714,16 +599,17 @@ export async function compactCurrentSession(
 async function execClaude(
   name: string,
   prompt: string,
-  threadId?: string,
+  input?: SessionInput,
   sink?: StatusSink,
   source: ThreadSource = "cli",
+  userText?: string,
 ): Promise<RunResult> {
   const logs = logsDir();
   await mkdir(logs, { recursive: true });
 
-  const existing = threadId
-    ? await getThreadSession(source, threadId)
-    : await getSession();
+  const session = sessionAccess(input, source);
+  const threadId = session.target.thread;
+  const existing = await session.get();
   const isNew = !existing;
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const logFile = join(logs, `${name}-${timestamp}.log`);
@@ -747,10 +633,13 @@ async function execClaude(
   } else {
     primaryConfig = { model, api };
   }
+  if (session.target.policy?.modelPolicy?.model !== undefined) {
+    primaryConfig = {model:session.target.policy.modelPolicy.model, api};
+  }
 
   const fallbackConfig: ModelConfig = {
-    model: fallback?.model ?? "",
-    api: fallback?.api ?? "",
+    model: session.target.policy?.modelPolicy?.fallback ?? fallback?.model ?? "",
+    api: session.target.policy?.modelPolicy?.fallback !== undefined ? primaryConfig.api : fallback?.api ?? "",
   };
   const securityArgs = buildSecurityArgs(security);
   const timeoutMs = (settings as any).sessionTimeoutMs || CLAUDE_TIMEOUT_MS;
@@ -759,21 +648,37 @@ async function execClaude(
     `[${new Date().toLocaleTimeString()}] Running: ${name} (${isNew ? "new session" : `resume ${existing.sessionId.slice(0, 8)}`}, security: ${security.level})`
   );
 
-  // New session: use json output to capture Claude's session_id
-  // Resumed session: use text output with --resume
+  // Preserve result/error envelopes on resumed turns as well as new sessions.
   // With sink: streaming path (stream-json --verbose) added inside runClaudeOnceStreaming.
-  const outputFormat = isNew ? "json" : "text";
   const args = sink
     ? [...claudeArgv(), "-p", prompt, ...securityArgs]
-    : [...claudeArgv(), "-p", prompt, "--output-format", outputFormat, ...securityArgs];
+    : [...claudeArgv(), "-p", prompt, "--output-format", "json", ...securityArgs];
 
   if (!isNew) {
     args.push("--resume", existing.sessionId);
   }
 
+  // Let Claude handle overload fallback inside the same invocation. Replaying a
+  // completed/partial task under another provider can duplicate side effects.
+  const nativeFallback = fallbackConfig.model.trim()
+    && primaryConfig.model.trim().toLowerCase() !== "glm"
+    && fallbackConfig.model.trim().toLowerCase() !== "glm"
+    && (!fallbackConfig.api.trim() || fallbackConfig.api.trim() === primaryConfig.api.trim());
+  if (nativeFallback) {
+    args.push("--fallback-model", fallbackConfig.model.trim());
+  } else if (fallbackConfig.model.trim()) {
+    console.warn("[Hermes] Fallback requires a native model on the primary provider; cross-provider fallback is disabled to avoid replaying side effects.");
+  }
+
+  if (session.scoped) args.push(...claudeSessionArgs(session.target));
+  else args.push("--system-prompt-snapshot", "off");
+  // Restricted channels dispatch approved skill bodies in the bridge. Disable
+  // native discovery so another skill cannot be invoked behind that allowlist.
+  if (session.target.policy && session.target.policy.allowedSkills !== "*") args.push("--disable-slash-commands");
+
   // Build the appended system prompt: prompt files + directory scoping
-  // This is passed on EVERY invocation (not just new sessions) because
-  // --append-system-prompt does not persist across --resume.
+  // Refresh on every invocation. Disabling the native system-prompt snapshot
+  // makes new runtime memory effective when resuming an existing session.
   const promptContent = await loadPrompts();
   const appendParts: string[] = [
     "You are running inside Claude Hermes.",
@@ -809,16 +714,18 @@ async function execClaude(
     }
     try {
       const db = await getSharedDb(process.cwd());
-      runtimeDigest = buildRuntimeMemoryDigest(db);
+      runtimeDigest = buildRuntimeMemoryDigest(db, { query: userText ?? prompt, target: session.scoped ? session.target : undefined });
     } catch {
       // DB digest failures are also non-fatal; file-backed memory still loads.
     }
     const runtimeMemory = await composeSystemPrompt({
-      memoryScope: "workspace",
+      memoryScope: session.scoped ? session.target.memoryScope : "workspace",
+      channelId: session.target.channel,
+      includeSharedMemory: !session.scoped || session.target.memoryScope === "workspace",
       cwd: process.cwd(),
-      blocks,
+      blocks: session.scoped ? [] : blocks,
       runtimeDigest,
-      includeAgentMemoryHint: true,
+      includeAgentMemoryHint: !session.scoped,
     });
     if (runtimeMemory.trim()) appendParts.push(runtimeMemory);
   } catch (e) {
@@ -834,7 +741,7 @@ async function execClaude(
   // fresh terminal invocation (see cleanChildEnv for the full rationale).
   const baseEnv = cleanChildEnv(process.env);
 
-  let exec: {
+  const exec: {
     rawStdout: string;
     stderr: string;
     exitCode: number;
@@ -853,35 +760,19 @@ async function execClaude(
         name,
       )
     : await runClaudeOnce(args, primaryConfig.model, primaryConfig.api, baseEnv, timeoutMs);
-  const primaryRateLimit = extractRateLimitMessage(exec.rawStdout, exec.stderr);
-  let usedFallback = false;
-
-  if (primaryRateLimit && hasModelConfig(fallbackConfig) && !sameModelConfig(primaryConfig, fallbackConfig)) {
-    console.warn(
-      `[${new Date().toLocaleTimeString()}] Claude limit reached; retrying with fallback${fallbackConfig.model ? ` (${fallbackConfig.model})` : ""}...`
-    );
-    exec = sink
-      ? await runClaudeOnceStreaming(
-          args,
-          fallbackConfig.model,
-          fallbackConfig.api,
-          baseEnv,
-          timeoutMs,
-          sink,
-          name,
-          name,
-        )
-      : await runClaudeOnce(args, fallbackConfig.model, fallbackConfig.api, baseEnv, timeoutMs);
-    usedFallback = true;
-  }
-
   const rawStdout = exec.rawStdout;
-  const stderr = exec.stderr;
-  const exitCode = exec.exitCode;
-  const extractedFromRaw = sink ? extractSessionAndResultFromText(rawStdout) : {};
+  let stderr = exec.stderr;
+  let exitCode = exec.exitCode;
+  const extractedFromRaw = extractSessionAndResultFromText(rawStdout);
   let stdout = rawStdout;
   let sessionId = existing?.sessionId ?? "unknown";
-  const rateLimitMessage = extractRateLimitMessage(rawStdout, stderr);
+  const rateLimitMessage = (exitCode !== 0 || extractedFromRaw.error)
+    ? extractRateLimitMessage(rawStdout, stderr) : null;
+
+  if (extractedFromRaw.error) {
+    exitCode = exitCode || 1;
+    stderr = stderr || extractedFromRaw.error;
+  }
 
   if (rateLimitMessage) {
     stdout = rateLimitMessage;
@@ -896,13 +787,8 @@ async function execClaude(
       if (streamedSessionId) {
         sessionId = streamedSessionId;
         stdout = streamedResult ?? "";
-        if (threadId) {
-          await createThreadSession(source, threadId, sessionId);
-          console.log(`[${new Date().toLocaleTimeString()}] Thread session created: ${sessionId} (thread ${threadId.slice(0, 8)})`);
-        } else {
-          await createSession(sessionId);
-          console.log(`[${new Date().toLocaleTimeString()}] Session created: ${sessionId}`);
-        }
+        await session.create(sessionId);
+        console.log(`[${new Date().toLocaleTimeString()}] Session created: ${sessionId} (${session.target.key})`);
       } else if (streamedResult !== undefined) {
         stdout = streamedResult;
       }
@@ -915,20 +801,14 @@ async function execClaude(
         }
         sessionId = extracted.sessionId;
         stdout = extracted.result ?? "";
-        if (threadId) {
-          await createThreadSession(source, threadId, sessionId);
-          console.log(`[${new Date().toLocaleTimeString()}] Thread session created: ${sessionId} (thread ${threadId.slice(0, 8)})`);
-        } else {
-          await createSession(sessionId);
-          console.log(`[${new Date().toLocaleTimeString()}] Session created: ${sessionId}`);
-        }
+        await session.create(sessionId);
+        console.log(`[${new Date().toLocaleTimeString()}] Session created: ${sessionId} (${session.target.key})`);
       } catch (e) {
         console.error(`[${new Date().toLocaleTimeString()}] Failed to parse session from Claude output:`, e);
       }
     }
-  } else if (!rateLimitMessage && !isNew && exitCode === 0 && sink) {
-    // Resumed sessions in streaming mode: stdout is the assistant's final text,
-    // not the NDJSON.
+  } else if (!rateLimitMessage && !isNew && exitCode === 0) {
+    // Callers receive the assistant text rather than transport envelopes.
     const streamedResult = exec.finalResult ?? extractedFromRaw.result;
     if (streamedResult !== undefined) stdout = streamedResult;
   }
@@ -951,19 +831,13 @@ async function execClaude(
   // shadow rows under `<source>:<thread>` / bare `sessionId`, which never
   // joined to the live session-manager rows.
   if (exitCode === 0 && !rateLimitMessage && sessionId && sessionId !== "unknown") {
-    const persistKey = threadId ? threadKey(source, threadId) : workspaceKey(process.cwd());
-    const persistScope = threadId ? "per-thread" : "workspace";
-    const persistSource = threadId ? source : "cli";
     await persistTurn({
+      ...session.target,
       cwd: process.cwd(),
-      key: persistKey,
-      source: persistSource,
-      scope: persistScope,
-      workspace: process.cwd(),
-      thread: threadId,
       claudeSessionId: sessionId,
       userPrompt: prompt,
       assistantReply: stdout,
+      userText,
     });
 
     if (settings.learning?.captureCandidateSkills) {
@@ -986,7 +860,7 @@ async function execClaude(
     `# ${name}`,
     `Date: ${new Date().toISOString()}`,
     `Session: ${sessionId} (${isNew ? "new" : "resumed"})`,
-    `Model config: ${usedFallback ? "fallback" : "primary"}`,
+    "Model config: primary (overload fallback handled by Claude)",
     ...(agentic.enabled ? [`Task type: ${taskType}`, `Routing: ${routingReasoning}`] : []),
     `Exit code: ${result.exitCode}`,
     `Prompt bytes: ${Buffer.byteLength(prompt, "utf8")}`,
@@ -1010,54 +884,16 @@ async function execClaude(
   await Bun.write(logFile, output);
   console.log(`[${new Date().toLocaleTimeString()}] Done: ${name} → ${logFile}`);
 
-  // --- Auto-compact on timeout (exit 124) ---
-  if (COMPACT_TIMEOUT_ENABLED && exitCode === 124 && !isNew && existing) {
-    emitCompactEvent({ type: "auto-compact-start" });
-    const compactOk = await runCompact(
-      existing.sessionId,
-      primaryConfig.model,
-      primaryConfig.api,
-      baseEnv,
-      securityArgs,
-      timeoutMs
-    );
-    emitCompactEvent({ type: "auto-compact-done", success: compactOk });
-
-    if (compactOk) {
-      console.log(`[${new Date().toLocaleTimeString()}] Retrying ${name} after compact...`);
-      const retryExec = await runClaudeOnce(args, primaryConfig.model, primaryConfig.api, baseEnv, timeoutMs);
-      const retryResult: RunResult = {
-        stdout: retryExec.rawStdout,
-        stderr: retryExec.stderr,
-        exitCode: retryExec.exitCode,
-      };
-      emitCompactEvent({
-        type: "auto-compact-retry",
-        success: retryExec.exitCode === 0,
-        stdout: retryResult.stdout,
-        stderr: retryResult.stderr,
-        exitCode: retryResult.exitCode,
-      });
-
-      if (retryExec.exitCode === 0) {
-        const count = threadId ? await incrementThreadTurn(source, threadId) : await incrementTurn();
-        console.log(`[${new Date().toLocaleTimeString()}] Turn count: ${count} (after compact + retry)`);
-      }
-      return retryResult;
-    }
-  }
+  // Timeouts have an unknown side-effect outcome. Keep the context and let
+  // the user decide whether to resume; automatic compact + replay is unsafe.
 
   // --- Turn tracking & compact warning ---
   if (exitCode === 0 && !isNew) {
-    const turnCount = threadId ? await incrementThreadTurn(source, threadId) : await incrementTurn();
+    const turnCount = await session.increment();
     console.log(`[${new Date().toLocaleTimeString()}] Turn count: ${turnCount}${threadId ? ` (thread ${threadId.slice(0, 8)})` : ""}`);
 
     if (turnCount >= COMPACT_WARN_THRESHOLD && existing && !existing.compactWarned) {
-      if (threadId) {
-        await markThreadCompactWarned(source, threadId);
-      } else {
-        await markCompactWarned();
-      }
+      await session.markWarned();
       emitCompactEvent({ type: "warn", turnCount });
     }
   }
@@ -1068,7 +904,7 @@ async function execClaude(
 export async function run(
   name: string,
   prompt: string,
-  threadId?: string,
+  threadId?: SessionInput,
   sink?: StatusSink,
   source: ThreadSource = "cli",
 ): Promise<RunResult> {
@@ -1088,12 +924,14 @@ function prefixUserMessageWithClock(prompt: string): string {
 
 export async function runUserMessage(
   name: string,
-  prompt: string,
-  threadId?: string,
+  prompt: string | { text: string; context: string },
+  threadId?: SessionInput,
   sink?: StatusSink,
   source: ThreadSource = "cli",
 ): Promise<RunResult> {
-  return run(name, prefixUserMessageWithClock(prompt), threadId, sink, source);
+  const text = typeof prompt === "string" ? prompt : prompt.text;
+  const context = typeof prompt === "string" ? prompt : prompt.context;
+  return enqueue(() => execClaude(name, prefixUserMessageWithClock(context), threadId, sink, source, text), threadId, source);
 }
 
 /**
@@ -1101,7 +939,7 @@ export async function runUserMessage(
  * session is created immediately. No-op if a session already exists.
  */
 export async function bootstrap(): Promise<void> {
-  const existing = await getSession();
+  const existing = await sessionAccess(undefined).get();
   if (existing) return;
 
   console.log(`[${new Date().toLocaleTimeString()}] Bootstrapping new session...`);

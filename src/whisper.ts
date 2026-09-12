@@ -1,3 +1,5 @@
+import { runProcess } from "./runtime/process";
+import { requestWithTimeout } from "./runtime/http";
 import { execSync, spawnSync } from "node:child_process";
 import { access, chmod, mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import { statSync, type Dirent } from "node:fs";
@@ -397,12 +399,10 @@ async function viaHttpApi(
   body.append("file", new Blob([bytes], { type: mime }), `audio.${ext}`);
   body.append("model", model);
 
-  const res = await fetch(endpoint, { method: "POST", body });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`STT API error (${res.status}): ${detail}`);
-  }
-  const payload = (await res.json()) as { text?: string };
+  const payload = await requestWithTimeout(endpoint,{method:"POST",body},async res => {
+    if (!res.ok) throw new Error(`STT API error (${res.status}): ${await res.text()}`);
+    return await res.json() as {text?:string};
+  },{timeoutMs:180_000});
   const text = (payload.text ?? "").trim();
   log(`voice transcribe: API transcript chars=${text.length}`);
   return text;
@@ -414,15 +414,14 @@ async function viaHttpApi(
 // re-download-and-retry when the binary itself has gone missing.
 // ---------------------------------------------------------------------------
 
-function runWhisper(wav: string): string {
+async function runWhisper(wav: string): Promise<string> {
   const libPathJoin = (existing: string | undefined) =>
     [CFG.lib, existing].filter(Boolean).join(":");
 
-  const proc = Bun.spawnSync(
+  const proc = await runProcess(
     [binaryPath(), "-m", modelPath(), "-f", wav, "--no-timestamps"],
     {
-      stdout: "pipe",
-      stderr: "pipe",
+      timeoutMs:180_000,
       env: {
         ...process.env,
         LD_LIBRARY_PATH: libPathJoin(process.env.LD_LIBRARY_PATH),
@@ -466,7 +465,7 @@ async function viaLocalBinary(input: string, log: LineSink): Promise<string> {
   try {
     let stdout: string;
     try {
-      stdout = runWhisper(wav);
+      stdout = await runWhisper(wav);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!msg.includes("ENOENT")) throw err;
@@ -474,7 +473,7 @@ async function viaLocalBinary(input: string, log: LineSink): Promise<string> {
       pendingWarmup = null;
       await rm(CFG.bin, { recursive: true, force: true });
       await warmupWhisperAssets();
-      stdout = runWhisper(wav);
+      stdout = await runWhisper(wav);
     }
     const transcript = cleanTranscript(stdout);
     log(`voice transcribe: transcript chars=${transcript.length}`);

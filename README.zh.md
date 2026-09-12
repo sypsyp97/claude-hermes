@@ -28,7 +28,7 @@ Claude Hermes 把你的 Claude Code 变成一个不睡觉的个人助理：后�
 /claude-hermes:start
 ```
 
-setup wizard 会一路引导你配 model、heartbeat、Telegram、Discord 和 security；配完 daemon 就在后台跑起来了。唯一的 runtime 依赖是 Bun — 如果没装，`start` 会问你要不要自动装一个。
+setup wizard 会一路引导你配 model、heartbeat、Telegram、Discord 和 security；配完 daemon 就在后台跑起来了。需要 Bun 和 **Claude Code 2.1.257+**；升级 Hermes 前先运行 `claude update`。缺少 Bun 时 `start` 会引导安装。对标依据、Claude 新功能适配和验证边界见 [可靠性评审](docs/AGENT_RELIABILITY_REVIEW.md)。
 
 如果这个 workspace 之前跑过上游的 Claw daemon，第一次 `start` 会把 `.claude/claudeclaw/` 一次性迁移到 `.claude/hermes/`，老目录原样留着当保险。
 
@@ -70,23 +70,30 @@ daemon 按频道名自动路由：
 - **DM** — 默认：per-user 记忆，每条都回。
 - **手动 override：** SQLite 里 `channel_policies` 的 per-channel 配置优先于按名字推断的默认值。
 
-### Discord 多 session 线程
+### Discord / Telegram 会话管理
 - **独立 thread session：** 每个 Discord thread 拿自己的 Claude CLI session。
 - **并行处理：** 不同 thread 里的消息互不阻塞。
 - **自动创建：** 一个新 thread 的第一条消息会 bootstrap 一个新 session。
-- **清理：** thread 被删或归档，对应的 session 也一起扔掉。
-- **向后兼容：** DM 和主频道消息还是走全局 session。
+- **生命周期：** 归档保留上下文；删除线程会清除其 SQLite session 和归属记忆。
+- **隔离：** 私聊按用户，服务器频道和群聊按频道中的用户，Telegram 话题按群 ID + 话题 ID 路由。
+- **控制命令：** `/reset`、`/forget`、`/compact`、`/status`、`/context` 都指向当前会话。重置保留记忆；遗忘会删除该会话的 Hermes 历史、事实和原生 auto-memory。上下文容量优先使用模型报告值，缺失时明确显示未知。
+- **频道策略：** 两个桥接都执行 session/memory scope、投递模式、模型和技能限制、自动建线程策略（Telegram 需要论坛群）。自动建线程与后续消息使用一致的策略，显式共享模式保持共享。
 
 细节看 [docs/MULTI_SESSION.md](docs/MULTI_SESSION.md)。
 
 ### 可靠性与控制
+- **连接恢复：** Discord 心跳与 Resume 使用可取消的连接代次；Telegram 长轮询和重试可中止，并遵守 `retry_after`。
+- **结果不确定时：** 发送网络故障和任务超时会明确报错，不自动重放可能已有副作用的操作。
+- **Telegram 重启：** 接收记录和轮询 offset 原子写入 SQLite。重启后提示未确认完成的请求，由用户检查部分执行结果后决定是否重发；不保证 exactly-once。
+- **执行控制：** 下载附件、查询元数据之前先保留消息顺序。缓冲输出、流式 Claude 和本地语音识别共享最多四个子进程名额；停止桥接会取消请求、子进程和排队中的执行。
 - **Agentic 模型路由：** 每个 turn 按关键词/短语分类成 `planning`（→ Opus）或 `implementation`（→ Sonnet）。modes 在 `settings.json` 里可配；关掉就固定用单一模型。
-- **模型 fallback：** 主模型撞 rate limit 时，自动用备用模型重试（推荐用 GLM 换 provider path 更稳）。
+- **模型 fallback：** 使用 Claude 原生 `--fallback-model`，限于同一 provider 凭据下的兼容模型；Hermes 不会在结果不确定时切换 provider 重跑整项任务。
 - **Security 级别：** 四档工具访问权限，全都是 headless（不会弹权限 prompt）：
-  - `locked` → 只能 `Read`、`Grep`、`Glob`；限定在项目目录。
-  - `strict` → 除 `Bash`、`WebSearch`、`WebFetch` 以外全开；限定在项目目录。
-  - `moderate` → 所有工具；限定在项目目录。
-  - `unrestricted` → 所有工具，不限目录。
+  - `locked` → 只能 `Read`、`Grep`、`Glob`，禁用 MCP 工具。
+  - `strict` → 除 `Bash`、`WebSearch`、`WebFetch` 以外全开。
+  - `moderate` → 所有工具，以项目作为工作目录。
+  - `unrestricted` → 所有工具，不额外传入目录提示。
+  这些 CLI 工具规则和目录提示不构成操作系统文件沙箱。
 - **Skill 自动晋升：** 在 7 天窗口内跑过 ≥20 次且成功率 ≥85% 的 candidate skill 自动升到 `active`。升上去后如果 rollback 窗口里成功率掉到 70% 以下，就被降回 `shadow`。阈值在 `src/learning/config.ts` 里，可调。
 - **Evolve 安全守则：** 自改子 agent 的 system prompt 永远前置一套硬规则 —— 禁 `git stash`、禁切分支、禁 `--no-verify`、禁 force push、禁写 cwd 外的文件。守则内容在 `prompts/EVOLVE_GUARDS.md`，丢失时还有保守的 inline fallback 兜底，永远不会静默失效。
 - **抗崩溃的 daemon registry：** `~/.claude/hermes/daemons.json` 用 tmp-write + rename 原子写，SIGKILL 打断写入也不会把 registry 抹掉。
@@ -99,6 +106,9 @@ daemon 按频道名自动路由：
 
 - **Identity** —— `prompts/{SOUL,IDENTITY,USER}.md` + 项目 `CLAUDE.md` + `.claude/hermes/memory/` 下的 workspace override。跨轮字节相同，CLI 的 prompt cache 才会命中。
 - **Episodic** —— `state.db` 把每一轮成功调用写进 `messages` 表；FTS5 做搜索，一个轻量的 importance 启发式 + recency / relevance 打分做排序。
+- **主动召回** —— 每轮先检索当前会话相关旧消息、归属事实和 Dream 摘要，再补充近期上下文；支持中文子串回退，限制注入长度。
+- **明确记忆** —— 成功处理“记住：…”、“remember that …”、“my editor is …”等明确陈述后保存带会话来源的事实。独立笔记互不覆盖，同名事实更新后只召回最新值；提取不额外调用模型。
+- **Claude 原生记忆** —— 每个桥接会话使用独立 auto-memory 目录，恢复会话时刷新系统提示。`memoryScope: none` 禁用自动记忆注入，但仍保存成功对话。项目文件和原生 CLI 配置属于共享可信工作区，不构成操作系统隔离。
 - **Primitives** —— 四个 opt-in 或者人工 gate 的东西，都已经接进 runtime：
   - `.claude/hermes/memory/blocks/` 下的标签 block 会以 `<block:NAME>…</block>` 的形式打进 system prompt。
   - `.claude/hermes/memory/agent/` 是 agent 自己的 scratchpad，走六操作协议（`view / create / strReplace / insert / del / rename`）。
@@ -143,3 +153,7 @@ MIT —— 见 [LICENSE](LICENSE)。
 - **`(SKILL.md + description + trajectory)` 结构 + FTS 检索的 skill 库** —— [Voyager](https://github.com/MineDojo/Voyager) 的 skill library 形状。
 - **importance · recency · relevance 打分** —— 斯坦福 Generative Agents 论文（[Park 等，2023](https://arxiv.org/abs/2304.03442)）。
 - **episodic / semantic 分层 + FTS5 当检索骨架** —— 思路上接近 [Zep](https://github.com/getzep/zep) 和 [mem0](https://github.com/mem0ai/mem0)，但砍掉了图 / 向量存储。
+
+### 主动记忆与新版 Claude
+
+每个 turn 先用 FTS5 检索相关旧消息，再注入近期上下文，检索范围限定在当前会话及有归属的事实。支持中文片段回退、检索数量和摘要长度预算。桥接会话各自使用 Claude 原生自动记忆目录，恢复会话时刷新系统提示。`memoryScope: none` 关闭自动记忆注入，但仍持久化成功的会话记录。项目文件、hooks、MCP 与 skills 仍属于受信任的共享工作区；这不是多租户沙箱。

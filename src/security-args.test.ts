@@ -22,6 +22,7 @@ describe("buildSecurityArgs — headless bypass follows the level", () => {
   test("locked default: no bypass (Read/Grep/Glob don't prompt)", () => {
     const args = buildSecurityArgs(cfg({ level: "locked" }));
     expect(args).not.toContain("--dangerously-skip-permissions");
+    expect(args[args.indexOf("--disallowedTools") + 1]).toContain("mcp__*");
   });
 
   test("strict auto-emits --dangerously-skip-permissions", () => {
@@ -56,13 +57,13 @@ describe("buildSecurityArgs — headless bypass follows the level", () => {
 });
 
 describe("buildSecurityArgs — level presets use the CLI-standard flags", () => {
-  test("locked → --allowedTools Read,Grep,Glob (not --tools)", () => {
+  test("locked limits available built-ins with --tools as well as approving read-only tools", () => {
     const args = buildSecurityArgs(cfg({ level: "locked" }));
     const idx = args.indexOf("--allowedTools");
     expect(idx).toBeGreaterThanOrEqual(0);
     expect(args[idx + 1]).toBe("Read,Grep,Glob");
-    // The non-standard `--tools` flag is gone.
-    expect(args).not.toContain("--tools");
+    // --allowedTools is an approval rule; --tools actually limits availability.
+    expect(args[args.indexOf("--tools") + 1]).toBe("Read,Grep,Glob");
   });
 
   test("strict → --disallowedTools Bash,WebSearch,WebFetch", () => {
@@ -107,8 +108,8 @@ describe("buildSecurityArgs — tool lists are comma-joined, not space-joined", 
   test("empty caller lists do not add stray flags", () => {
     const args = buildSecurityArgs(cfg({ level: "locked" }));
     // locked emits --allowedTools for its own preset; make sure the caller's
-    // empty list does not add a second one or a stray --disallowedTools.
+    // empty list does not add another set of flags.
     expect(args.filter((a) => a === "--allowedTools").length).toBe(1);
-    expect(args).not.toContain("--disallowedTools");
+    expect(args.filter((a) => a === "--disallowedTools")).toHaveLength(1);
   });
 });

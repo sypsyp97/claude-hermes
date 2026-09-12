@@ -13,10 +13,11 @@
  * Writes create the containing directory as needed.
  */
 
-import { mkdir, readdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import { existsSync, type Dirent } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import {
+  canonicalWorkspace,
   channelMemoryFile,
   crossSessionMemoryFile,
   identityMemoryFile,
@@ -25,6 +26,7 @@ import {
   soulMemoryFile,
   userMemoryFile,
 } from "../paths";
+import { withMemoryFileLock } from "./file-lock";
 import { claudeProjectMemoryDir } from "../runtime/claude-paths";
 
 export async function readSoul(cwd?: string): Promise<string> {
@@ -40,7 +42,7 @@ export async function readUserMemory(cwd?: string): Promise<string> {
 }
 
 export async function readCrossSessionMemory(cwd?: string): Promise<string> {
-  return readIfExists(crossSessionMemoryFile(cwd));
+  return readIfExists(crossSessionMemoryFile(canonicalWorkspace(cwd)));
 }
 
 export async function readChannelMemory(channelId: string, cwd?: string): Promise<string> {
@@ -48,7 +50,7 @@ export async function readChannelMemory(channelId: string, cwd?: string): Promis
 }
 
 export async function appendCrossSessionMemory(entry: string, cwd?: string): Promise<void> {
-  const path = crossSessionMemoryFile(cwd);
+  const path = crossSessionMemoryFile(canonicalWorkspace(cwd));
   const now = new Date().toISOString();
   const payload = `\n<!-- ${now} -->\n${entry.trim()}\n`;
   await appendToFile(path, payload);
@@ -75,8 +77,7 @@ async function readIfExists(path: string): Promise<string> {
 
 async function appendToFile(path: string, payload: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  const prev = existsSync(path) ? await readFile(path, "utf8") : "";
-  await writeFile(path, prev + payload, "utf8");
+  await withMemoryFileLock(path, () => appendFile(path, payload, "utf8"));
 }
 
 async function writeWithMkdir(path: string, content: string): Promise<void> {

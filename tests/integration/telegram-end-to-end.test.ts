@@ -17,7 +17,7 @@
  *     adapter is responsible for stripping them.
  */
 
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -96,6 +96,10 @@ afterAll(async () => {
   if (tmpProj) await rmWithRetry(tmpProj);
 });
 
+beforeEach(async () => {
+  await sessions.resetSession();
+});
+
 afterEach(() => {
   // The fake-claude scenario env vars are sticky; clear them after every
   // test so a stray HERMES_FAKE_REPLY from a previous case doesn't leak in.
@@ -162,6 +166,12 @@ describe("Telegram end-to-end (text path)", () => {
   });
 
   test("second turn resumes the same global session and increments turnCount", async () => {
+    process.env.HERMES_FAKE_SESSION_ID = "telegram-session-1";
+    expect(
+      (await runner.runUserMessage("telegram", buildTelegramPrompt({ username: "alice", text: "ping" })))
+        .exitCode
+    ).toBe(0);
+    delete process.env.HERMES_FAKE_SESSION_ID;
     process.env.HERMES_FAKE_REPLY = "second turn ok";
     const prompt = buildTelegramPrompt({ username: "alice", text: "again" });
     const result = await runner.runUserMessage("telegram", prompt);
@@ -169,7 +179,7 @@ describe("Telegram end-to-end (text path)", () => {
     expect(result.exitCode).toBe(0);
     const after = await sessions.peekSession();
     expect(after?.sessionId).toBe("telegram-session-1"); // unchanged
-    expect((after?.turnCount ?? 0) >= 1).toBe(true); // resume increments
+    expect(after?.turnCount).toBe(1);
   });
 
   test("[react:emoji] directive survives the runner; adapter would strip it", async () => {

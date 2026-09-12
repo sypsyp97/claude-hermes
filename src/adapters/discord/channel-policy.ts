@@ -20,6 +20,10 @@ export interface DiscordChannelHints {
   channel?: string;
   channelName?: string;
   isDm?: boolean;
+  isThread?: boolean;
+  parentChannel?: string;
+  parentChannelName?: string;
+  legacyListen?: boolean;
 }
 
 export function resolveDiscordPolicy(db: Database, hints: DiscordChannelHints): ChannelPolicy {
@@ -31,7 +35,7 @@ export function resolveDiscordPolicy(db: Database, hints: DiscordChannelHints): 
       })
     : null;
 
-  const name = hints.channelName?.toLowerCase() ?? "";
+  const name = (hints.isThread ? hints.parentChannelName : hints.channelName)?.toLowerCase() ?? "";
   let base: ChannelPolicy;
   if (hints.isDm) {
     base = defaultPolicy({ source: "discord", isDm: true });
@@ -39,9 +43,20 @@ export function resolveDiscordPolicy(db: Database, hints: DiscordChannelHints): 
     base = listenPolicy();
   } else if (name.startsWith("deliver-") || name === "delivery") {
     base = deliveryPolicy();
+  } else if (hints.legacyListen) {
+    base = listenPolicy();
   } else {
     base = defaultPolicy({ source: "discord", guild: hints.guild, channel: hints.channel });
   }
 
+  if (hints.isThread) base.sessionScope = "per-thread";
+  const parent = hints.parentChannel
+    ? getPolicy<Partial<ChannelPolicy>>(db, {
+        source: "discord",
+        guild: hints.guild,
+        channel: hints.parentChannel,
+      })
+    : null;
+  if (parent) base = mergePolicy(base, parent);
   return override ? mergePolicy(base, override) : base;
 }

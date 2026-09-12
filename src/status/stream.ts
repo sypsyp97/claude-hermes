@@ -34,6 +34,7 @@ export interface StreamParser {
 
 export function createStreamParser(): StreamParser {
   let buffer = "";
+  const state = { messageId: "", streamed: new Set<string>() };
 
   return {
     push(chunk: string): StatusEvent[] {
@@ -43,21 +44,21 @@ export function createStreamParser(): StreamParser {
       while (nl !== -1) {
         const line = buffer.slice(0, nl);
         buffer = buffer.slice(nl + 1);
-        out.push(...translateLine(line));
+        out.push(...translateLine(line, state));
         nl = buffer.indexOf("\n");
       }
       return out;
     },
     flush(): StatusEvent[] {
       if (!buffer) return [];
-      const out = translateLine(buffer);
+      const out = translateLine(buffer, state);
       buffer = "";
       return out;
     },
   };
 }
 
-function translateLine(raw: string): StatusEvent[] {
+function translateLine(raw: string, state: { messageId: string; streamed: Set<string> }): StatusEvent[] {
   const trimmed = raw.trim();
   if (!trimmed) return [];
   let parsed: unknown;
@@ -68,6 +69,19 @@ function translateLine(raw: string): StatusEvent[] {
   }
   if (!isObject(parsed)) return [];
   const type = parsed.type;
+
+  if (type === "stream_event" && isObject(parsed.event) && !parsed.parent_tool_use_id) {
+    const event = parsed.event;
+    if (event.type === "message_start" && isObject(event.message)) {
+      state.messageId = typeof event.message.id === "string" ? event.message.id : "";
+      state.streamed.clear();
+    }
+    if (event.type === "content_block_delta" && isObject(event.delta) && event.delta.type === "text_delta" && typeof event.delta.text === "string") {
+      state.streamed.add(`${state.messageId}:${event.index}`);
+      return [{ kind: "text_delta", text: event.delta.text }];
+    }
+    return [];
+  }
 
   if (type === "system" && parsed.subtype === "init") {
     return [
@@ -83,10 +97,12 @@ function translateLine(raw: string): StatusEvent[] {
     const content = (parsed.message as { content?: unknown }).content;
     if (!Array.isArray(content)) return [];
     const events: StatusEvent[] = [];
-    for (const block of content) {
+    for (const [index, block] of content.entries()) {
       if (!isObject(block)) continue;
       if (block.type === "text" && typeof block.text === "string") {
-        events.push({ kind: "text_delta", text: block.text });
+        if (!parsed.parent_tool_use_id && !state.streamed.has(`${parsed.message.id ?? ""}:${index}`)) {
+          events.push({ kind: "text_delta", text: block.text });
+        }
       } else if (
         block.type === "tool_use" &&
         typeof block.id === "string" &&
@@ -128,8 +144,9 @@ function translateLine(raw: string): StatusEvent[] {
 
   if (type === "result") {
     const resultText = typeof parsed.result === "string" ? parsed.result : "";
-    if (parsed.subtype === "error") {
-      return [{ kind: "error", message: resultText || "unknown error" }];
+    if (parsed.is_error === true || (typeof parsed.subtype === "string" && parsed.subtype.startsWith("error"))) {
+      const errors = Array.isArray(parsed.errors) ? parsed.errors.filter(e => typeof e === "string").join("; ") : "";
+      return [{ kind: "error", message: errors || resultText || String(parsed.subtype ?? "unknown error") }];
     }
     const event: Extract<StatusEvent, { kind: "task_complete" }> = {
       kind: "task_complete",
@@ -180,6 +197,7 @@ export function formatToolLabel(name: string, input: unknown): string {
       if (typeof q !== "string" || !q) return name;
       return `${name}(${q})`;
     }
+    case "Agent":
     case "Task": {
       const d = input.description ?? input.subagent_type;
       if (typeof d !== "string" || !d) return name;

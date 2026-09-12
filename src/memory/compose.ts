@@ -23,6 +23,8 @@ const AGENT_MEMORY_HINT =
 
 export interface ComposeContext {
   channelId?: string;
+  /** Include owner-wide file memory only when the caller explicitly shares it. */
+  includeSharedMemory?: boolean;
   memoryScope: ChannelPolicy["memoryScope"];
   cwd?: string;
   /** Optional hard cap on total characters; MEMORY is head-trimmed first, then a final slice is applied as a fallback. */
@@ -96,7 +98,7 @@ async function readLayerBundle(ctx: ComposeContext): Promise<LayerBundle> {
 
   // USER is included for any scope that touches persisted state ("none" is
   // the only exclusion). Channel-scoped runs still want the owner facts.
-  if (ctx.memoryScope === "user" || ctx.memoryScope === "workspace" || ctx.memoryScope === "channel") {
+  if (ctx.includeSharedMemory !== false && ctx.memoryScope !== "none") {
     stablePrefix.push(await readUserMemory(ctx.cwd));
   }
 
@@ -105,7 +107,7 @@ async function readLayerBundle(ctx: ComposeContext): Promise<LayerBundle> {
   }
 
   let memory = "";
-  if (ctx.memoryScope !== "none") {
+  if (ctx.includeSharedMemory !== false && ctx.memoryScope !== "none") {
     memory = sanitizeMemory(await readCrossSessionMemory(ctx.cwd));
   }
 
@@ -114,11 +116,14 @@ async function readLayerBundle(ctx: ComposeContext): Promise<LayerBundle> {
     suffix.push(await readChannelMemory(ctx.channelId, ctx.cwd));
   }
 
-  const blocks = framedBlocks(ctx.blocks);
-  const runtime = ctx.runtimeDigest && ctx.runtimeDigest.trim().length > 0 ? [ctx.runtimeDigest] : [];
+  const blocks = ctx.memoryScope === "none" ? [] : framedBlocks(ctx.blocks);
+  const runtime =
+    ctx.memoryScope !== "none" && ctx.runtimeDigest && ctx.runtimeDigest.trim().length > 0
+      ? [ctx.runtimeDigest]
+      : [];
 
   const trailer: string[] = [];
-  if (ctx.includeAgentMemoryHint === true) {
+  if (ctx.memoryScope !== "none" && ctx.includeAgentMemoryHint === true) {
     trailer.push(AGENT_MEMORY_HINT);
   }
 

@@ -290,3 +290,35 @@ describe("formatToolLabel", () => {
     expect(formatToolLabel("Read", 42)).toBe("Read");
   });
 });
+
+test("partial text is emitted once when Claude later sends the complete assistant envelope", () => {
+  const parser = createStreamParser();
+  const events = [
+    { type: "stream_event", event: { type: "message_start", message: { id: "m1" } } },
+    {
+      type: "stream_event",
+      event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hello" } },
+    },
+    { type: "assistant", message: { id: "m1", content: [{ type: "text", text: "hello" }] } },
+  ];
+  const out = events.flatMap((event) => parser.push(JSON.stringify(event) + "\n"));
+  expect(out.filter((event) => event.kind === "text_delta")).toEqual([{ kind: "text_delta", text: "hello" }]);
+  // The first token is emitted immediately, before the complete envelope.
+  const live = createStreamParser();
+  live.push(JSON.stringify(events[0]) + "\n");
+  expect(live.push(JSON.stringify(events[1]) + "\n")).toEqual([{ kind: "text_delta", text: "hello" }]);
+});
+
+test("Claude result errors are failures for all current error subtypes", () => {
+  for (const subtype of [
+    "error_max_turns",
+    "error_during_execution",
+    "error_max_budget_usd",
+    "error_max_structured_output_retries",
+  ]) {
+    const events = createStreamParser().push(
+      JSON.stringify({ type: "result", subtype, is_error: true, errors: ["budget exhausted"] }) + "\n"
+    );
+    expect(events).toEqual([{ kind: "error", message: "budget exhausted" }]);
+  }
+});

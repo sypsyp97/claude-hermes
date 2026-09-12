@@ -13,8 +13,8 @@
  * caller (the Discord `/status` path) wants the global view.
  */
 
-import { readFile, unlink, writeFile } from "fs/promises";
-import { threadSessionsFile } from "./paths";
+import { readFile, unlink, writeFile, rm } from "fs/promises";
+import { threadSessionsFile, nativeMemoryDirectory } from "./paths";
 import { threadKey } from "./router/session-key";
 import { getSharedDb } from "./state/shared-db";
 import {
@@ -87,10 +87,16 @@ export async function createThreadSession(
   });
 }
 
-/** Remove a thread session (e.g., on thread delete/archive). */
+/** Delete a removed thread and its attributed memory; archival retains context. */
 export async function removeThreadSession(source: ThreadSource, threadId: string): Promise<void> {
   const db = await getSharedDb();
-  deleteByKey(db, threadKey(source, threadId));
+  await rm(nativeMemoryDirectory(process.cwd(), threadKey(source, threadId)), {recursive:true, force:true});
+  db.transaction(() => {
+    const row = getByKey(db, threadKey(source, threadId));
+    // ON DELETE SET NULL would turn scoped workspace facts into shared facts.
+    if (row) db.prepare("DELETE FROM memory_entries WHERE source_session_id = ?").run(row.id);
+    deleteByKey(db, threadKey(source, threadId));
+  })();
   // Also strip the entry from the legacy `sessions.json`. Otherwise the
   // importer that runs on every fresh shared-db open would re-insert the
   // just-deleted thread on the next daemon restart. The legacy file can't
@@ -107,16 +113,16 @@ export async function removeThreadSession(source: ThreadSource, threadId: string
 // delete — silently resurrecting one of the "deleted" threads on next boot.
 let legacyRewriteChain: Promise<void> = Promise.resolve();
 
-function forgetLegacyThread(threadId: string): Promise<void> {
-  const next = legacyRewriteChain.then(() => rewriteLegacyOnce(threadId));
+export function forgetLegacyThread(threadId: string, cwd = process.cwd()): Promise<void> {
+  const next = legacyRewriteChain.then(() => rewriteLegacyOnce(threadId, cwd));
   // Don't let one rewrite's rejection poison the chain — the inner function
   // already swallows fs errors, but be defensive.
   legacyRewriteChain = next.catch(() => undefined);
   return next;
 }
 
-async function rewriteLegacyOnce(threadId: string): Promise<void> {
-  const path = threadSessionsFile();
+async function rewriteLegacyOnce(threadId: string, cwd: string): Promise<void> {
+  const path = threadSessionsFile(cwd);
   let raw: string;
   try {
     raw = await readFile(path, "utf8");
