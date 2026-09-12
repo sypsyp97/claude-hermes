@@ -92,9 +92,9 @@ hosting isolation boundary.
 ## TDD and verification
 
 Baseline full verify: **1,123 unit + 23 smoke + 60 integration tests**.
-Final local verify: **1,151 unit + 23 smoke + 69 integration tests**, all green
-on Linux with Bun 1.3.4 (37 additional tests). The macOS/latest-Bun CI matrix
-and real-service acceptance still need to run in their own environments.
+Final local verify: **1,152 unit + 23 smoke + 69 integration tests**, all green
+on Linux with Bun 1.3.4 (38 additional tests). GitHub CI runs the four-way
+Ubuntu/macOS and pinned/latest-Bun matrix; real-service acceptance remains separate.
 Behavioral failures were reproduced before implementation for memory recall and
 provenance, transport retry/cancellation, channel inheritance, stream/result parsing,
 locked tool availability, timeout replay, archival, deleted fact provenance and
@@ -102,10 +102,16 @@ queued Discord reset acknowledgement. New modules also received contract tests
 before their implementation. Actual bridge handlers are exercised through the
 runner and a deterministic Claude subprocess fixture.
 
+The initial macOS CI run also exposed concurrent migration through `/var` and
+`/private/var` aliases of one workspace. A symlink regression test reproduced this
+on Linux before the fix. Shared database initialization now resolves the physical
+state directory before caching its promise, so aliases share one initialized handle.
+
 Key tests: `runtime-digest.recall.test.ts`, `gateway.test.ts`, `polling.test.ts`,
 `telegram-api.test.ts`, `telegram.delivery.test.ts`, `bridge-session.test.ts`,
 `session-target.test.ts`, `stream.test.ts`, `claude-output.test.ts`,
-`security-args.test.ts`, and `tests/integration/scoped-bridge-runtime.test.ts`.
+`security-args.test.ts`, `shared-db.test.ts`, and
+`tests/integration/scoped-bridge-runtime.test.ts`.
 Run `bun run verify --json` for the authoritative five-stage result.
 No dependency, schema migration, disabled test or relaxed gate is required.
 

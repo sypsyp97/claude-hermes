@@ -16,7 +16,8 @@
  * so a stale handle from a just-deleted tempdir does not resurface.
  */
 
-import { unlinkSync } from "node:fs";
+import { mkdirSync, realpathSync, unlinkSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { applyMigrations } from "./bootstrap";
 import { type Database, openDb } from "./db";
 import { importLegacyJson } from "./import-json";
@@ -26,7 +27,17 @@ const cache = new Map<string, Promise<Database>>();
 const pathByHandle = new WeakMap<Database, string>();
 
 export function getSharedDb(cwd: string = process.cwd()): Promise<Database> {
-  const path = stateDbFile(cwd);
+  const requestedPath = stateDbFile(cwd);
+  // Resolve aliases before caching the initialization promise. macOS may expose
+  // the same workspace through /var and /private/var; separate handles would
+  // race while applying the first migrations to the same physical database.
+  let path: string;
+  try {
+    mkdirSync(dirname(requestedPath), { recursive: true });
+    path = join(realpathSync(dirname(requestedPath)), basename(requestedPath));
+  } catch (error) {
+    return Promise.reject(error);
+  }
   const existing = cache.get(path);
   if (existing) return existing;
   const promise = (async () => {
