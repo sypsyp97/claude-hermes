@@ -1,8 +1,7 @@
-import { createHash } from "node:crypto";
-import { join } from "node:path";
-import { hermesDir } from "../paths";
+import { rm } from "node:fs/promises";
+import { canonicalWorkspace, nativeMemoryDirectory } from "../paths";
 /** A resolved conversation identity shared by execution, controls and recall. */
-import type { MemoryScope } from "../policy/channel";
+import type { MemoryScope, ChannelPolicy } from "../policy/channel";
 import type { SessionScope } from "../router/envelope";
 import { threadKey, workspaceKey } from "../router/session-key";
 import { getSharedDb } from "../state/shared-db";
@@ -27,6 +26,7 @@ export interface SessionTarget {
   thread?: string;
   user?: string;
   memoryScope: MemoryScope;
+  policy?: Pick<ChannelPolicy, "allowedSkills" | "modelPolicy">;
 }
 
 export type SessionInput = string | SessionTarget;
@@ -35,7 +35,7 @@ export function sessionAccess(input: SessionInput | undefined, source: ThreadSou
   const scoped = typeof input === "object";
   const thread = typeof input === "string" ? input : undefined;
   const target: SessionTarget = scoped
-    ? input
+    ? { ...input, workspace: canonicalWorkspace(input.workspace) }
     : {
         key: thread ? threadKey(source, thread) : workspaceKey(process.cwd()),
         scope: thread ? "per-thread" : "workspace",
@@ -106,16 +106,28 @@ export function sessionAccess(input: SessionInput | undefined, source: ThreadSou
         "UPDATE sessions SET claude_session_id = NULL, turn_count = 0, compact_warned = 0 WHERE key = ?"
       ).run(target.key);
     },
+    async forget() {
+      if (!scoped) throw new Error("Forgetting memory requires an explicit conversation target.");
+      const db = await getSharedDb(target.workspace);
+      // Remove native files first: a filesystem error must not leave an
+      // apparently forgotten conversation whose native memory still exists.
+      await rm(nativeMemoryDirectory(target.workspace, target.key), { recursive: true, force: true });
+      db.transaction(() => {
+        const row = getByKey(db, target.key);
+        if (row) db.prepare("DELETE FROM memory_entries WHERE source_session_id = ?").run(row.id);
+        db.prepare("DELETE FROM sessions WHERE key = ?").run(target.key);
+      })();
+      if (target.thread) await threadSessions.forgetLegacyThread(target.thread, target.workspace);
+    },
   };
 }
 
 /** Claude Code >= 2.1.257: per-conversation native auto memory and refreshed runtime context. */
 export function claudeSessionArgs(target: SessionTarget): string[] {
-  const id = createHash("sha256").update(target.key).digest("hex");
   return [
     "--settings",
     JSON.stringify({
-      autoMemoryDirectory: join(hermesDir(target.workspace), "claude-memory", id),
+      autoMemoryDirectory: nativeMemoryDirectory(target.workspace, target.key),
       ...(target.memoryScope === "none" ? { autoMemoryEnabled: false } : {}),
     }),
     "--system-prompt-snapshot",

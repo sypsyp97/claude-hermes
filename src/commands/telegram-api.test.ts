@@ -84,3 +84,21 @@ test("safe reads retry transient failures with a bounded budget", async () => {
   ).rejects.toThrow("503");
   expect(calls).toBe(3);
 });
+
+test("multipart sends validate API errors and do not retry ambiguous uploads", async () => {
+  const body = new FormData();
+  body.set("chat_id", "1");
+  body.set("document", new Blob(["test"]), "test.txt");
+  let calls = 0;
+  await expect(
+    telegramApi("fake", "sendDocument", body, {
+      fetch: async (_url, init) => {
+        calls++;
+        expect(init.body).toBe(body);
+        expect(init.headers).toBeUndefined();
+        return Response.json({ ok: false, error_code: 500, description: "unknown upload result" });
+      },
+    })
+  ).rejects.toThrow("500");
+  expect(calls).toBe(1);
+});

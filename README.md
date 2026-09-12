@@ -76,20 +76,24 @@ The daemon auto-routes channels by name:
 - **Auto-create:** the first message in a new thread bootstraps a fresh session.
 - **Lifecycle:** archive retains context; deletion clears the thread's SQLite session and attributed facts.
 - **Isolation:** DMs use per-user sessions, server/group messages use per-channel-user sessions, and Telegram topics include their chat ID.
-- **Controls:** `/reset`, `/compact`, `/status` and `/context` address the current conversation. Reset retains long-term memory; old workspace history is not automatically shared into new bridge sessions.
+- **Controls:** `/reset`, `/forget`, `/compact`, `/status` and `/context` address the current conversation. Reset retains memory; forget erases its Hermes history/facts and native auto-memory directory. Context capacity uses model-reported limits when available.
+- **Channel policy:** both bridges enforce session/memory scope, delivery role, model selection, allowed skills and automatic threads (Telegram requires a forum group). Explicit shared scope remains shared when a thread is created.
 
 See [docs/MULTI_SESSION.md](docs/MULTI_SESSION.md) for the routing details.
 
 ### Reliability and control
 - **Connection recovery:** Discord heartbeat/resume recovery uses cancellable generations; Telegram uses abortable polling and bounded request retries that honor `retry_after`.
 - **Uncertain outcomes:** network send failures and timed-out tasks are surfaced without automatic replay.
+- **Telegram restart:** SQLite receipts and polling offsets survive process restarts. Unconfirmed requests produce a recovery notice; check any partial effects before resending. This does not guarantee exactly-once delivery.
+- **Execution:** input order is reserved before attachment/metadata work. Buffered Claude, streaming Claude and local speech transcription share a four-process budget; bridge stop cancels requests, children and queued admissions.
 - **Agentic model routing:** classify each turn as `planning` (→ Opus) or `implementation` (→ Sonnet) by keyword/phrase. Modes are fully configurable in `settings.json`; disable to pin a single model.
-- **Model fallback:** if the primary model hits a rate limit, automatically retry on a backup model (prefer GLM for provider diversity).
+- **Model fallback:** Claude's native `--fallback-model` handles compatible models within the same provider credentials. Hermes does not replay an entire task across providers after an ambiguous failure.
 - **Security levels:** four tool-access tiers, all headless (no permission prompts):
-  - `locked` → `Read`, `Grep`, `Glob` only; scoped to project dir.
-  - `strict` → everything except `Bash`, `WebSearch`, `WebFetch`; scoped to project dir.
-  - `moderate` → all tools; scoped to project dir.
-  - `unrestricted` → all tools, no directory scoping.
+  - `locked` → `Read`, `Grep`, `Glob` only; MCP tools denied.
+  - `strict` → everything except `Bash`, `WebSearch`, `WebFetch`.
+  - `moderate` → all tools, with the project as the working directory.
+  - `unrestricted` → all tools, without additional directory hints.
+  These CLI tool rules and directory hints are not an OS filesystem sandbox.
 - **Skill auto-promotion:** after ≥20 runs in a 7-day window with ≥85% success rate, a candidate skill is promoted to `active`. If success drops below 70% in the rollback window after promotion, it demotes back to `shadow`. Thresholds live in `src/learning/config.ts` and are tunable.
 - **Evolve safety guards:** the self-edit subagent's system prompt is always prefixed with hard rules — no `git stash`, no branch switching, no `--no-verify`, no force push, no writes outside the cwd. The guards live in `prompts/EVOLVE_GUARDS.md` with a conservative inline fallback so they can never go silent.
 - **Crash-safe daemon registry:** `~/.claude/hermes/daemons.json` uses atomic tmp-write + rename, so a SIGKILL mid-write can't wipe the registry.
@@ -103,6 +107,7 @@ Three layers, stable to volatile:
 - **Identity** — `prompts/{SOUL,IDENTITY,USER}.md` + project `CLAUDE.md` + per-workspace overrides in `.claude/hermes/memory/`. Byte-identical across turns so the CLI's prompt cache stays warm.
 - **Episodic** — `state.db` logs every successful turn to a `messages` table; FTS5 for search, a small importance heuristic + recency/relevance score for ranking.
 - **Proactive recall** — every turn searches relevant older messages with FTS5 before adding recent context. Bridge recall uses the current conversation and attributed facts, with a bounded digest and CJK fallback.
+- **Explicit memory** — successful turns persist explicit facts such as “remember that …”, “my editor is …” and “记住：…”, with conversation provenance. Independent notes remain independent; updated facts replace prior values in recall. No extra model request is used for extraction.
 - **Native Claude memory** — each bridge conversation has its own auto-memory directory. Refreshed system prompts make new recall effective on resume. `memoryScope: none` disables automatic memory injection, while transcript persistence remains enabled.
 - **Primitives** — four opt-in or human-gated pieces, all wired into the runtime:
   - Labeled memory blocks in `.claude/hermes/memory/blocks/` land in the system prompt as `<block:NAME>…</block>`.

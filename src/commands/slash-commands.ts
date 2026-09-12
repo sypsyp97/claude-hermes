@@ -33,7 +33,12 @@ export const HARDCODED_COMMANDS: SlashCommandSpec[] = [
   },
   {
     name: "reset",
-    description: "Reset the global session for a fresh start",
+    description: "Reset this conversation; retain saved memory",
+    type: 1,
+  },
+  {
+    name: "forget",
+    description: "Erase this conversation's saved memory and history",
     type: 1,
   },
   {

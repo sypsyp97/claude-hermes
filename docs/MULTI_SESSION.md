@@ -1,7 +1,7 @@
 # Conversation sessions
 
 Production Discord and Telegram handlers resolve a `SessionTarget` shared by
-execution, reset, compact, status, context lookup and proactive memory recall.
+execution, reset, forget, compact, status, context lookup and proactive memory recall.
 SQLite `state.db` is authoritative; legacy JSON files are migration inputs.
 
 ## Default routing
@@ -27,16 +27,28 @@ into a group. The new bridge conversations start fresh on upgrade.
 Runner work is serialized by canonical conversation key; idle queue entries are
 removed. Different lanes can run concurrently. An omitted target retains the
 legacy workspace API; a string retains the source-qualified thread API.
+Transport admission reserves channel arrival order before attachment and metadata
+lookups. A shared budget limits Claude and local STT to four child processes;
+queued execution can be cancelled when its bridge stops.
 
 - `/reset` waits behind admitted work and clears this conversation's Claude ID
   and counters. Messages, facts and native auto memory remain searchable. Reset
   is not data erasure.
+- `/forget` erases this conversation's Hermes messages, facts, digests and native
+  auto-memory directory. Claude-owned original transcripts outside Hermes remain
+  under the CLI's retention settings.
 - `/compact` resumes the addressed session on the same execution lane.
 - `/status` and `/context` inspect the addressed conversation.
 - Discord archival retains context for unarchival. Rejoin skips archived threads.
-  Deletion removes the SQLite session, messages and attributed facts after admitted
-  work. Native Claude transcript/memory files have a separate lifecycle.
+  Deletion removes thread-owned SQLite sessions across `per-thread`, `shared`
+  and `per-channel-user` policies, including messages, facts and native auto-memory,
+  after admitted work. Explicit cross-channel `per-user` sessions remain intact.
+  Claude-owned original
+  transcripts have a separate lifecycle.
 - Timeout terminates the child before releasing its lane, without replaying the task.
+- Telegram commits receipt metadata and offsets before acknowledging updates.
+  After restart, uncertain requests are reported for manual checking/resubmission;
+  they are never automatically replayed. No message bodies enter the receipts.
 
 ## Memory
 
@@ -62,3 +74,4 @@ requirements, TDD coverage and remaining durability/isolation limitations.
 | `src/adapters/discord/channel-policy.ts` | Defaults, inheritance and overrides |
 | `src/adapters/discord/gateway.ts` | Reconnect, resume, heartbeat and cancellation |
 | `src/adapters/telegram/polling.ts` | Poll admission, offsets and cancellation |
+| `src/adapters/telegram/checkpoint.ts` | Durable receipts and restart checkpoints |

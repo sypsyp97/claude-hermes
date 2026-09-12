@@ -1,8 +1,13 @@
-import { ensureProjectClaudeMd, runUserMessage, compactCurrentSession, resetCurrentSession, deleteThreadSession } from "../runner";
+import { formatContextUsage } from "../runtime/context-usage";
+import { enqueueBridge } from "../runtime/bridge-queue";
+import { withBridgeSignal } from "../runtime/bridge-context";
+import { downloadBytes } from "../runtime/http";
+import { ensureProjectClaudeMd, runUserMessage, compactCurrentSession, resetCurrentSession, deleteThreadSession, forgetCurrentSession } from "../runner";
 import { getSettings, loadSettings } from "../config";
 import { sessionAccess } from "../runtime/session-target";
 import { discordSessionTarget } from "../router/bridge-session";
 import { resolveDiscordPolicy } from "../adapters/discord/channel-policy";
+import { isSkillAllowed } from "../policy/channel";
 import { getSharedDb } from "../state/shared-db";
 import { listThreadSessions, peekThreadSession } from "../sessionManager";
 import { readFile } from "node:fs/promises";
@@ -78,6 +83,7 @@ interface DiscordGuild {
 }
 
 let gateway: ReturnType<typeof createGateway> | null = null;
+let gatewayController: AbortController | null = null;
 let gatewayGeneration = 0;
 let discordDebug = false;
 
@@ -232,7 +238,19 @@ async function resolveConversation(channelId: string, userId: string, guildId?: 
     isDm: !guildId, isThread, parentChannel: parentId, parentChannelName: parentId ? channels.get(parentId)?.name : undefined,
     legacyListen: config.listenChannels.includes(channelId) || (!!parentId && config.listenChannels.includes(parentId)),
   });
-  return { policy, target: discordSessionTarget({ workspace: process.cwd(), channelId, userId, guildId, isThread }, policy) };
+  return { policy, isThread, target: discordSessionTarget({ workspace: process.cwd(), channelId, userId, guildId, isThread }, policy) };
+}
+
+async function createAutoThread(token: string, channelId: string, userId: string, guildId: string, label: string, messageId?: string) {
+  const endpoint = messageId ? `/channels/${channelId}/messages/${messageId}/threads` : `/channels/${channelId}/threads`;
+  const thread = await discordApi<{id:string;name?:string}>(token,"POST",endpoint, {
+    name: label.trim().slice(0,100) || "Conversation", auto_archive_duration:1440,
+    ...(messageId ? {} : {type:11}),
+  });
+  knownThreads.set(thread.id,{parentId:channelId});
+  channels.set(thread.id,{...thread,type:11,parent_id:channelId,guild_id:guildId});
+  // Resolve exactly as the next incoming message will, including explicit sharing.
+  return resolveConversation(thread.id,userId,guildId);
 }
 
 // --- Guild trigger logic ---
@@ -271,14 +289,12 @@ async function downloadDiscordAttachment(
   const dir = discordInboxDir();
   await mkdir(dir, { recursive: true });
 
-  const response = await fetch(attachment.url);
-  if (!response.ok) throw new Error(`Discord attachment download failed: ${response.status}`);
+  const bytes = await downloadBytes(attachment.url);
 
   const ext = extname(attachment.filename) || (type === "voice" ? ".ogg" : ".jpg");
   const filename = `${attachment.id}-${Date.now()}${ext}`;
   const localPath = join(dir, filename);
 
-  const bytes = new Uint8Array(await response.arrayBuffer());
   await Bun.write(localPath, bytes);
   debugLog(`Attachment downloaded: ${localPath} (${bytes.length} bytes)`);
   return localPath;
@@ -322,13 +338,17 @@ async function respondToInteraction(
 // --- Message handler ---
 
 export async function handleMessageCreate(token: string, message: DiscordMessage): Promise<void> {
+  return enqueueBridge("discord", message.channel_id, () => processMessageCreate(token, message));
+}
+
+async function processMessageCreate(token: string, message: DiscordMessage): Promise<void> {
   const config = getSettings().discord;
 
   // Ignore bot messages
   if (message.author.bot) return;
 
   const userId = message.author.id;
-  const channelId = message.channel_id;
+  let channelId = message.channel_id;
   const isDM = !message.guild_id;
   const isGuild = !!message.guild_id;
   const content = message.content;
@@ -351,7 +371,7 @@ export async function handleMessageCreate(token: string, message: DiscordMessage
     return;
   }
 
-  const { target, policy } = await resolveConversation(channelId, userId, message.guild_id);
+  let { target, policy, isThread } = await resolveConversation(channelId, userId, message.guild_id);
   if (policy.mode === "delivery-only" || policy.deliveryRole === "delivery") return;
   const triggerReason = isGuild ? guildTriggerReason(message) : "direct_message";
   if (isGuild && !triggerReason && !["listen", "free-response", "shared"].includes(policy.mode)) return;
@@ -368,6 +388,12 @@ export async function handleMessageCreate(token: string, message: DiscordMessage
   let cleanContent = content;
   if (botUserId) {
     cleanContent = cleanContent.replace(new RegExp(`<@!?${botUserId}>`, "g"), "").trim();
+  }
+
+  const command = cleanContent.startsWith("/") ? cleanContent.trim().split(/\s+/, 1)[0].toLowerCase() : null;
+  if (command && !isSkillAllowed(policy, command)) {
+    await sendMessage(config.token, channelId, `Skill ${command} is not allowed in this conversation.`);
+    return;
   }
 
   const label = message.author.username;
@@ -465,7 +491,7 @@ export async function handleMessageCreate(token: string, message: DiscordMessage
           if (foundId) {
             try {
               await discordApi(config.token, "DELETE", `/channels/${foundId}`);
-              await deleteThreadSession("discord", foundId);
+              await enqueueBridge("discord", foundId, () => deleteThreadSession("discord", foundId));
               knownThreads.delete(foundId);
               results.push(`🗑️ **${targetName}** — deleted`);
             } catch (err) {
@@ -480,8 +506,13 @@ export async function handleMessageCreate(token: string, message: DiscordMessage
       }
     }
 
+    if (message.guild_id && policy.autoThread && !isThread) {
+      const conversation = await createAutoThread(config.token, channelId, userId, message.guild_id, cleanContent || `${label}'s conversation`, message.id);
+      target = conversation.target;
+      channelId = target.channel!;
+    }
+
     // Skill routing: detect slash commands and resolve to SKILL.md prompts
-    const command = cleanContent.startsWith("/") ? cleanContent.trim().split(/\s+/, 1)[0].toLowerCase() : null;
     let skillContext: string | null = null;
     if (command) {
       try {
@@ -526,7 +557,7 @@ export async function handleMessageCreate(token: string, message: DiscordMessage
       transport: discordStatusTransport(config.token),
       channelId,
     });
-    const result = await runUserMessage("discord", prefixedPrompt, threadId, statusSink, "discord");
+    const result = await runUserMessage("discord", {text: cleanContent || voiceTranscript || "", context: prefixedPrompt}, threadId, statusSink, "discord");
 
     if (result.exitCode !== 0) {
       await sendMessage(config.token, channelId, `Error (exit ${result.exitCode}): ${result.stderr || result.stdout || "Unknown error"}`);
@@ -534,7 +565,7 @@ export async function handleMessageCreate(token: string, message: DiscordMessage
       const visibleText = extractSessionAndResultFromText(result.stdout || "").result ?? result.stdout ?? "";
       const { cleanedText, reactionEmoji } = extractReactionDirective(visibleText);
       if (reactionEmoji) {
-        await sendReaction(config.token, channelId, message.id, reactionEmoji).catch((err) => {
+        await sendReaction(config.token, message.channel_id, message.id, reactionEmoji).catch((err) => {
           console.error(`[Discord] Failed to send reaction for ${label}: ${err instanceof Error ? err.message : err}`);
         });
       }
@@ -564,15 +595,27 @@ export async function handleInteractionCreate(token: string, interaction: Discor
   // Discord requires an acknowledgement within three seconds. Resolve channel
   // policy, read transcripts and wait for queued controls after deferring.
   if (interaction.type === 2 && (interaction.application_id ?? applicationId)) {
-    await discordApi(token, "POST", `/interactions/${interaction.id}/${interaction.token}/callback`, { type: 5 });
-    deferredInteractions.add(interaction);
+    const acknowledgement = discordApi(token, "POST", `/interactions/${interaction.id}/${interaction.token}/callback`, { type: 5 })
+      .then(() => { deferredInteractions.add(interaction); });
+    void acknowledgement.catch(() => {}); // The reserved lane observes the failure after earlier work.
+    // Reserve the lane synchronously, while the acknowledgement is in flight.
+    // This keeps controls behind earlier media preparation without delaying ACK.
+    return enqueueBridge("discord", interaction.channel_id ?? "", async () => {
+      await acknowledgement;
+      await processInteractionCreate(token, interaction, actorId);
+    });
   }
+  return enqueueBridge("discord", interaction.channel_id ?? "", () => processInteractionCreate(token, interaction, actorId));
+}
+
+async function processInteractionCreate(token: string, interaction: DiscordInteraction, actorId: string): Promise<void> {
+  const config = getSettings().discord;
 
   if (!interaction.channel_id) {
     await respondToInteraction(interaction, { content: "A conversation channel is required.", flags: 64 });
     return;
   }
-  const { target, policy } = await resolveConversation(interaction.channel_id, actorId, interaction.guild_id);
+  const { target, policy, isThread } = await resolveConversation(interaction.channel_id, actorId, interaction.guild_id);
   if (policy.mode === "delivery-only" || policy.deliveryRole === "delivery") {
     await respondToInteraction(interaction, { content: "This channel is delivery-only.", flags: 64 });
     return;
@@ -595,6 +638,12 @@ export async function handleInteractionCreate(token: string, interaction: Discor
       return;
     }
 
+    if (interaction.data.name === "forget") {
+      await forgetCurrentSession(target);
+      await respondToInteraction(interaction, {content: "This conversation's Hermes history, saved facts and native auto memory were erased. Next message starts fresh."});
+      return;
+    }
+
     if (interaction.data.name === "compact") {
       await respondToInteraction(interaction, { content: "⏳ Compacting session..." });
       const channelId = interaction.channel_id;
@@ -605,14 +654,7 @@ export async function handleInteractionCreate(token: string, interaction: Discor
           })
         : undefined;
       const result = await compactCurrentSession({ sink, target });
-      await fetch(
-        `${DISCORD_API}/webhooks/${applicationId}/${interaction.token}/messages/@original`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: result.message }),
-        },
-      );
+      await respondToInteraction(interaction, { content: result.message });
       return;
     }
 
@@ -662,41 +704,7 @@ export async function handleInteractionCreate(token: string, interaction: Discor
       }
       try {
         const raw = await readFile(jsonlPath, "utf8");
-        const fileLines = raw.trim().split("\n");
-        let lastUsage: any = null;
-        let totalOutput = 0;
-        for (const line of fileLines) {
-          try {
-            const obj = JSON.parse(line);
-            if (obj.message?.usage) lastUsage = obj.message.usage;
-            if (obj.message?.usage?.output_tokens) totalOutput += obj.message.usage.output_tokens;
-          } catch {}
-        }
-        if (!lastUsage) {
-          await respondToInteraction(interaction, { content: "No usage data found." });
-          return;
-        }
-        const input = lastUsage.input_tokens ?? 0;
-        const cacheCreation = lastUsage.cache_creation_input_tokens ?? 0;
-        const cacheRead = lastUsage.cache_read_input_tokens ?? 0;
-        const totalContext = input + cacheCreation + cacheRead;
-        const maxContext = 200000;
-        const pct = ((totalContext / maxContext) * 100).toFixed(1);
-        const filled = Math.round((Math.min(totalContext / maxContext, 1)) * 20);
-        const bar = "█".repeat(filled) + "░".repeat(20 - filled);
-        const msg = [
-          `📐 **Context Window**`,
-          `${bar} ${pct}%`,
-          ``,
-          `Total: \`${totalContext.toLocaleString()}\` / \`${maxContext.toLocaleString()}\` tokens`,
-          `├ Input: \`${input.toLocaleString()}\``,
-          `├ Cache creation: \`${cacheCreation.toLocaleString()}\``,
-          `├ Cache read: \`${cacheRead.toLocaleString()}\``,
-          `└ Output (cumulative): \`${totalOutput.toLocaleString()}\``,
-          ``,
-          `Turns: ${(session as any).turnCount ?? 0}`,
-        ];
-        await respondToInteraction(interaction, { content: msg.join("\n") });
+        await respondToInteraction(interaction, { content: formatContextUsage(raw, session.turnCount ?? 0) });
       } catch (err) {
         await respondToInteraction(interaction, {
           content: `Failed to read context: ${err instanceof Error ? err.message : err}`,
@@ -710,6 +718,10 @@ export async function handleInteractionCreate(token: string, interaction: Discor
     // resolves to a skill body gets the legacy "Unknown command" reply so
     // autocomplete-surfaced but now-missing names still get a response.
     const commandName = interaction.data.name;
+    if (!isSkillAllowed(policy, commandName)) {
+      await respondToInteraction(interaction, {content: `Skill /${commandName} is not allowed in this conversation.`, flags:64});
+      return;
+    }
     try {
       // Plugin skills are registered with discovery's `${plugin}_${skill}`
       // name but resolveSkillPrompt expects `${plugin}:${skill}`. If the
@@ -731,8 +743,15 @@ export async function handleInteractionCreate(token: string, interaction: Discor
           content: `⏳ Running /${commandName}…`,
         });
 
-        const channelId = interaction.channel_id;
-        const threadId = target;
+        let channelId = interaction.channel_id;
+        let threadId = target;
+        let createdThread = false;
+        if (interaction.guild_id && policy.autoThread && !isThread) {
+          const conversation = await createAutoThread(config.token, channelId, actorId, interaction.guild_id, commandName);
+          threadId = conversation.target;
+          channelId = threadId.channel!;
+          createdThread = true;
+        }
 
         const promptParts = [
           `[Discord slash command /${commandName}]`,
@@ -762,14 +781,8 @@ export async function handleInteractionCreate(token: string, interaction: Discor
               "(empty response)"
             : `Error (exit ${result.exitCode}): ${result.stderr || result.stdout || "Unknown error"}`;
 
-        await fetch(
-          `${DISCORD_API}/webhooks/${applicationId}/${interaction.token}/messages/@original`,
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ content: body.slice(0, 2000) }),
-          },
-        ).catch((err) => {
+        if (createdThread) await sendMessage(config.token, channelId, body);
+        await respondToInteraction(interaction, { content: createdThread ? `Result posted in <#${channelId}>.` : body.slice(0, 2000) }).catch((err) => {
           console.error(
             `[Discord] Failed to patch slash-command response: ${err}`,
           );
@@ -902,7 +915,7 @@ export function handleDispatch(token: string, eventName: string, data: any): voi
       if (data.id) channels.delete(data.id);
       if (data.id) {
         knownThreads.delete(data.id);
-        deleteThreadSession("discord", data.id).catch((err) =>
+        enqueueBridge("discord", data.id, () => deleteThreadSession("discord", data.id)).catch((err) =>
           console.error(`[Discord] Failed to cleanup thread session: ${err}`),
         );
         debugLog(`Thread removed: ${data.id}`);
@@ -939,6 +952,7 @@ export { sendMessage, sendMessageToUser };
 
 /** Stop gateway connection and clear runtime state (used for token rotation/hot reload). */
 export function stopGateway(): void {
+  gatewayController?.abort(); gatewayController = null;
   gatewayGeneration++;
   gateway?.stop(); gateway = null;
   readyGuildIds = null; botUserId = null; botUsername = null; applicationId = null;
@@ -958,6 +972,8 @@ export function startGateway(debug = false): void {
   const config = getSettings().discord;
   stopGateway();
   const generation = gatewayGeneration;
+  const controller = new AbortController();
+  gatewayController = controller;
   console.log("Discord bot started (gateway)");
   console.log(`  Allowed users: ${config.allowedUserIds.length === 0 ? "none (fail-closed)" : config.allowedUserIds.join(", ")}`);
   if (config.listenChannels.length > 0) {
@@ -968,7 +984,7 @@ export function startGateway(debug = false): void {
   (async () => {
     await ensureProjectClaudeMd();
     if (generation !== gatewayGeneration) return;
-    gateway = createGateway({ token: config.token, onDispatch: (name, data) => handleDispatch(config.token, name, data), log: message => console.error(`[Discord] ${message}`) });
+    gateway = createGateway({ token: config.token, onDispatch: (name, data) => withBridgeSignal(controller.signal, () => handleDispatch(config.token, name, data)), log: message => console.error(`[Discord] ${message}`) });
     gateway.start();
   })().catch((err) => {
     console.error(`[Discord] Fatal: ${err}`);
@@ -990,7 +1006,9 @@ export async function discord() {
   console.log(`  Allowed users: ${config.allowedUserIds.length === 0 ? "none (fail-closed)" : config.allowedUserIds.join(", ")}`);
   if (discordDebug) console.log("  Debug: enabled");
 
-  gateway = createGateway({ token: config.token, onDispatch: (name, data) => handleDispatch(config.token, name, data), log: message => console.error(`[Discord] ${message}`) });
+  stopGateway();
+  const controller = new AbortController(); gatewayController = controller;
+  gateway = createGateway({ token: config.token, onDispatch: (name, data) => withBridgeSignal(controller.signal, () => handleDispatch(config.token, name, data)), log: message => console.error(`[Discord] ${message}`) });
   gateway.start();
   // Keep process alive
   await new Promise(() => {});

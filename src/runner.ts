@@ -1,13 +1,14 @@
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import { existsSync } from "fs";
-import { claudeSessionArgs, sessionAccess, type SessionInput } from "./runtime/session-target";
-import { removeThreadSession, type ThreadSource } from "./sessionManager";
+import { claudeSessionArgs, sessionAccess, type SessionInput, type SessionTarget } from "./runtime/session-target";
+import { type ThreadSource } from "./sessionManager";
 import { getSettings, type ModelConfig, type SecurityConfig } from "./config";
 import { buildClockPromptPrefix } from "./timezone";
 import { selectModel } from "./model-router";
 import { claudeArgv } from "./runtime/claude-cli";
-import { createStreamParser, type StatusEvent } from "./status/stream";
+import { runClaudeStreaming } from "./runtime/claude-stream";
+import { runProcess } from "./runtime/process";
 import type { StatusSink } from "./status/sink";
 import {
   LEGACY_MANAGED_BLOCK_END,
@@ -22,9 +23,11 @@ import {
 import { threadKey } from "./router/session-key";
 import { composeSystemPrompt } from "./memory/compose";
 import { buildRuntimeMemoryDigest } from "./memory/runtime-digest";
+import { nudgeAndPersist } from "./memory/nudge";
+import type { MemoryScope } from "./policy/channel";
 import { readAllBlocks } from "./memory/blocks";
 import { getSharedDb } from "./state/shared-db";
-import { upsertSession } from "./state/repos/sessions";
+import { upsertSession, type SessionRow } from "./state/repos/sessions";
 import { appendMessage } from "./state/repos/messages";
 import { captureCandidateSkill } from "./learning/completion-hook";
 import { createToolCollector } from "./learning/tool-collector";
@@ -78,7 +81,7 @@ const RATE_LIMIT_PATTERN = /you.ve hit your limit|out of extra usage/i;
 let globalQueue: Promise<unknown> = Promise.resolve();
 // Independent conversations run in parallel. Canonical keys include the
 // source so bridges cannot accidentally share a lane.
-const threadQueues = new Map<string, Promise<unknown>>();
+const threadQueues = new Map<string, { tail: Promise<unknown>; target: SessionTarget }>();
 
 /**
  * Persist a single user→assistant turn to the SQLite messages store.
@@ -101,6 +104,8 @@ async function persistTurn(opts: {
   claudeSessionId: string;
   userPrompt: string;
   assistantReply: string;
+  userText?: string;
+  memoryScope?: MemoryScope;
 }): Promise<void> {
   try {
     const db = await getSharedDb(opts.cwd);
@@ -127,6 +132,9 @@ async function persistTurn(opts: {
         content: opts.assistantReply,
       });
     })();
+    if (opts.userText) await nudgeAndPersist([{role:"user", content:opts.userText}], {
+      cwd: opts.cwd, sourceSessionId: sessionRow.id, memoryScope: opts.memoryScope,
+    });
   } catch (e) {
     console.error(`[${new Date().toLocaleTimeString()}] Failed to persist turn to messages store:`, e);
   }
@@ -135,14 +143,15 @@ async function persistTurn(opts: {
 function enqueue<T>(fn: () => Promise<T>, threadId?: SessionInput, source: ThreadSource = "cli"): Promise<T> {
   if (threadId) {
     const key = typeof threadId === "object" ? threadId.key : threadKey(source, threadId);
-    const current = threadQueues.get(key) ?? Promise.resolve();
+    const current = threadQueues.get(key)?.tail ?? Promise.resolve();
     const task = current.then(fn, fn);
     const tracked = task.catch(() => {});
-    threadQueues.set(key, tracked);
+    const entry = { tail: tracked, target: sessionAccess(threadId, source).target };
+    threadQueues.set(key, entry);
     // Once this task settles, drop the entry if it is still the tail of the
     // queue. Otherwise a newer task has already landed and owns the slot.
     void tracked.finally(() => {
-      if (threadQueues.get(key) === tracked) {
+      if (threadQueues.get(key) === entry) {
         threadQueues.delete(key);
       }
     });
@@ -174,14 +183,6 @@ function extractRateLimitMessage(stdout: string, stderr: string): string | null 
     if (trimmed && RATE_LIMIT_PATTERN.test(trimmed)) return trimmed;
   }
   return null;
-}
-
-function sameModelConfig(a: ModelConfig, b: ModelConfig): boolean {
-  return a.model.trim().toLowerCase() === b.model.trim().toLowerCase() && a.api.trim() === b.api.trim();
-}
-
-function hasModelConfig(value: ModelConfig): boolean {
-  return value.model.trim().length > 0 || value.api.trim().length > 0;
 }
 
 function isNotFoundError(error: unknown): boolean {
@@ -219,54 +220,8 @@ async function runClaudeOnce(
   const args = [...baseArgs];
   const normalizedModel = model.trim().toLowerCase();
   if (model.trim() && normalizedModel !== "glm") args.push("--model", model.trim());
-
-  const proc = Bun.spawn(args, {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: buildChildEnv(baseEnv, model, api),
-  });
-
-  // The timeout timer must be cleared on success — otherwise it keeps the
-  // event loop alive (`claude-hermes send` would hang for the full
-  // CLAUDE_TIMEOUT_MS after the child has already exited cleanly).
-  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(
-      () => reject(new Error(`Claude session timed out after ${timeoutMs / 1000}s`)),
-      timeoutMs
-    );
-  });
-
-  try {
-    const [rawStdout, stderr] = (await Promise.race([
-      Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]),
-      timeoutPromise,
-    ])) as [string, string, number];
-    await proc.exited;
-
-    return {
-      rawStdout,
-      stderr,
-      exitCode: proc.exitCode ?? 1,
-    };
-  } catch (err) {
-    // Keep the conversation lane occupied until the timed-out child exits.
-    try { proc.kill("SIGTERM"); } catch {}
-    const killTimer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 5000);
-    await proc.exited;
-    clearTimeout(killTimer);
-
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[${new Date().toLocaleTimeString()}] ${message}`);
-
-    return {
-      rawStdout: "",
-      stderr: message,
-      exitCode: 124,
-    };
-  } finally {
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-  }
+  const result = await runProcess(args,{env:buildChildEnv(baseEnv,model,api),timeoutMs});
+  return {rawStdout:result.stdout,stderr:result.stderr,exitCode:result.exitCode};
 }
 
 /**
@@ -298,125 +253,19 @@ async function runClaudeOnceStreaming(
   finalResult?: string;
   toolCalls?: TrajectoryToolCall[];
 }> {
-  const args = [...baseArgs, "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
+  const args = baseArgs.slice(claudeArgv().length);
   const normalizedModel = model.trim().toLowerCase();
   if (model.trim() && normalizedModel !== "glm") args.push("--model", model.trim());
-
-  try { await sink.open(taskId, taskLabel); } catch { /* Status transport is best effort. */ }
-
-  const proc = Bun.spawn(args, {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: buildChildEnv(baseEnv, model, api),
-  });
-
   const collector = createToolCollector();
-
-  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(
-      () => reject(new Error(`Claude session timed out after ${timeoutMs / 1000}s`)),
-      timeoutMs,
-    );
+  const result = await runClaudeStreaming({
+    args, cwd:process.cwd(), env:buildChildEnv(baseEnv, model, api),
+    timeoutMs, sink, taskId, label:taskLabel,
+    onEvent: event => collector.handleEvent(event),
   });
-
-  const parser = createStreamParser();
-  let rawStdout = "";
-  let sessionId: string | undefined;
-  let finalResult: string | undefined;
-  let errorShort: string | undefined;
-
-  async function handleEvents(events: StatusEvent[]): Promise<void> {
-    for (const event of events) {
-      if (event.kind === "task_start") {
-        sessionId = event.sessionId ?? sessionId;
-      } else if (event.kind === "task_complete") {
-        sessionId = event.sessionId ?? sessionId;
-        finalResult = event.result;
-      } else if (event.kind === "error") {
-        errorShort = event.message;
-      }
-      // Collect tool-use trajectory OUTSIDE the sink try/catch: a sink throw
-      // must never skip collection, since the learning loop relies on this
-      // list for SKILL.md bodies.
-      collector.handleEvent(event);
-      try {
-        await sink.update(event);
-      } catch {
-        // sink failures must never kill the Claude process
-      }
-    }
-  }
-
-  const readStdout = async (): Promise<void> => {
-    const reader = proc.stdout.getReader();
-    const decoder = new TextDecoder();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        rawStdout += chunk;
-        await handleEvents(parser.push(chunk));
-      }
-      const tail = decoder.decode();
-      if (tail) {
-        rawStdout += tail;
-        await handleEvents(parser.push(tail));
-      }
-      await handleEvents(parser.flush());
-    } finally {
-      reader.releaseLock();
-    }
+  return {
+    rawStdout:result.stdout, stderr:result.stderr, exitCode:result.exitCode,
+    sessionId:result.sessionId, finalResult:result.finalResult, toolCalls:collector.toolCalls(),
   };
-
-  try {
-    const [, stderr] = (await Promise.race([
-      Promise.all([readStdout(), new Response(proc.stderr).text(), proc.exited]),
-      timeoutPromise,
-    ])) as [void, string, number];
-    await proc.exited;
-    const exitCode = errorShort ? (proc.exitCode || 1) : (proc.exitCode ?? 1);
-    const ok = exitCode === 0;
-    try {
-      const closeResult: { ok: boolean; finalText?: string; errorShort?: string } = { ok };
-      if (finalResult !== undefined) closeResult.finalText = finalResult;
-      if (!ok && (errorShort ?? stderr)) closeResult.errorShort = errorShort ?? stderr.trim().slice(-200);
-      await sink.close(closeResult);
-    } catch {
-      // close failures must not mask the task result
-    }
-    const out: {
-      rawStdout: string;
-      stderr: string;
-      exitCode: number;
-      sessionId?: string;
-      finalResult?: string;
-      toolCalls?: TrajectoryToolCall[];
-    } = { rawStdout, stderr, exitCode, toolCalls: collector.toolCalls() };
-    if (sessionId !== undefined) out.sessionId = sessionId;
-    if (finalResult !== undefined) out.finalResult = finalResult;
-    return out;
-  } catch (err) {
-    try { proc.kill("SIGTERM"); } catch {}
-    const killTimer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 5000);
-    await proc.exited;
-    clearTimeout(killTimer);
-    const message = err instanceof Error ? err.message : String(err);
-    try {
-      await sink.close({ ok: false, errorShort: message });
-    } catch {
-      // swallow
-    }
-    return {
-      rawStdout: "",
-      stderr: message,
-      exitCode: 124,
-      toolCalls: collector.toolCalls(),
-    };
-  } finally {
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-  }
 }
 
 /**
@@ -531,6 +380,7 @@ export function buildSecurityArgs(security: SecurityConfig): string[] {
     case "locked":
       args.push("--tools", "Read,Grep,Glob");
       args.push("--allowedTools", "Read,Grep,Glob");
+      args.push("--disallowedTools", "mcp__*");
       break;
     case "strict":
       args.push("--disallowedTools", "Bash,WebSearch,WebFetch");
@@ -660,9 +510,35 @@ export function resetCurrentSession(opts?: { target?: SessionInput; source?: Thr
   return enqueue(() => sessionAccess(opts?.target, opts?.source).reset(), opts?.target, opts?.source);
 }
 
+export function forgetCurrentSession(target: SessionInput): Promise<void> {
+  return enqueue(() => sessionAccess(target).forget(), target);
+}
+
 /** Wait for admitted turns before deleting a thread so completion cannot recreate it. */
-export function deleteThreadSession(source: ThreadSource, threadId: string): Promise<void> {
-  return enqueue(() => removeThreadSession(source, threadId), threadId, source);
+export async function deleteThreadSession(source: ThreadSource, threadId: string): Promise<void> {
+  const canonical = sessionAccess(threadId, source).target;
+  const targets = new Map([[canonical.key, canonical]]);
+  const ownedByThread = (target: Pick<SessionTarget, "source" | "scope" | "thread" | "channel">) =>
+    target.source === source && (
+      (target.scope === "per-thread" && target.thread === threadId) ||
+      (source === "discord" && ["shared", "per-channel-user"].includes(target.scope) && target.channel === threadId)
+    );
+  // A first turn may not have a DB row yet. Keep its target alongside the lane
+  // so deletion waits for it and cannot race a late session/memory write.
+  for (const { target } of threadQueues.values()) if (ownedByThread(target)) targets.set(target.key, target);
+  const db = await getSharedDb();
+  for (const row of db.query<SessionRow, [string, string, string]>(
+    "SELECT * FROM sessions WHERE source = ? AND (thread = ? OR channel = ?)"
+  ).all(source, threadId, threadId)) {
+    const target: SessionTarget = {
+      key: row.key, source, scope: row.scope as SessionTarget["scope"], workspace: row.workspace,
+      thread: row.thread ?? undefined, channel: row.channel ?? undefined, memoryScope: "none",
+    };
+    if (ownedByThread(target)) targets.set(target.key, target);
+  }
+  await Promise.all([...targets.values()].map(target =>
+    enqueue(() => sessionAccess(target).forget(), target, source)
+  ));
 }
 
 export function compactCurrentSession(opts?: { sink?: StatusSink; target?: SessionInput; source?: ThreadSource }): Promise<{ success: boolean; message: string }> {
@@ -692,7 +568,7 @@ async function compactSession(
 
   const ok = await runCompact(
     existing.sessionId,
-    settings.model,
+    session.target.policy?.modelPolicy?.model ?? settings.model,
     settings.api,
     baseEnv,
     [...securityArgs, ...(session.scoped ? claudeSessionArgs(session.target) : [])],
@@ -726,6 +602,7 @@ async function execClaude(
   input?: SessionInput,
   sink?: StatusSink,
   source: ThreadSource = "cli",
+  userText?: string,
 ): Promise<RunResult> {
   const logs = logsDir();
   await mkdir(logs, { recursive: true });
@@ -756,10 +633,13 @@ async function execClaude(
   } else {
     primaryConfig = { model, api };
   }
+  if (session.target.policy?.modelPolicy?.model !== undefined) {
+    primaryConfig = {model:session.target.policy.modelPolicy.model, api};
+  }
 
   const fallbackConfig: ModelConfig = {
-    model: fallback?.model ?? "",
-    api: fallback?.api ?? "",
+    model: session.target.policy?.modelPolicy?.fallback ?? fallback?.model ?? "",
+    api: session.target.policy?.modelPolicy?.fallback !== undefined ? primaryConfig.api : fallback?.api ?? "",
   };
   const securityArgs = buildSecurityArgs(security);
   const timeoutMs = (settings as any).sessionTimeoutMs || CLAUDE_TIMEOUT_MS;
@@ -778,8 +658,23 @@ async function execClaude(
     args.push("--resume", existing.sessionId);
   }
 
+  // Let Claude handle overload fallback inside the same invocation. Replaying a
+  // completed/partial task under another provider can duplicate side effects.
+  const nativeFallback = fallbackConfig.model.trim()
+    && primaryConfig.model.trim().toLowerCase() !== "glm"
+    && fallbackConfig.model.trim().toLowerCase() !== "glm"
+    && (!fallbackConfig.api.trim() || fallbackConfig.api.trim() === primaryConfig.api.trim());
+  if (nativeFallback) {
+    args.push("--fallback-model", fallbackConfig.model.trim());
+  } else if (fallbackConfig.model.trim()) {
+    console.warn("[Hermes] Fallback requires a native model on the primary provider; cross-provider fallback is disabled to avoid replaying side effects.");
+  }
+
   if (session.scoped) args.push(...claudeSessionArgs(session.target));
   else args.push("--system-prompt-snapshot", "off");
+  // Restricted channels dispatch approved skill bodies in the bridge. Disable
+  // native discovery so another skill cannot be invoked behind that allowlist.
+  if (session.target.policy && session.target.policy.allowedSkills !== "*") args.push("--disable-slash-commands");
 
   // Build the appended system prompt: prompt files + directory scoping
   // Refresh on every invocation. Disabling the native system-prompt snapshot
@@ -846,7 +741,7 @@ async function execClaude(
   // fresh terminal invocation (see cleanChildEnv for the full rationale).
   const baseEnv = cleanChildEnv(process.env);
 
-  let exec: {
+  const exec: {
     rawStdout: string;
     stderr: string;
     exitCode: number;
@@ -865,35 +760,14 @@ async function execClaude(
         name,
       )
     : await runClaudeOnce(args, primaryConfig.model, primaryConfig.api, baseEnv, timeoutMs);
-  const primaryRateLimit = extractRateLimitMessage(exec.rawStdout, exec.stderr);
-  let usedFallback = false;
-
-  if (primaryRateLimit && hasModelConfig(fallbackConfig) && !sameModelConfig(primaryConfig, fallbackConfig)) {
-    console.warn(
-      `[${new Date().toLocaleTimeString()}] Claude limit reached; retrying with fallback${fallbackConfig.model ? ` (${fallbackConfig.model})` : ""}...`
-    );
-    exec = sink
-      ? await runClaudeOnceStreaming(
-          args,
-          fallbackConfig.model,
-          fallbackConfig.api,
-          baseEnv,
-          timeoutMs,
-          sink,
-          name,
-          name,
-        )
-      : await runClaudeOnce(args, fallbackConfig.model, fallbackConfig.api, baseEnv, timeoutMs);
-    usedFallback = true;
-  }
-
   const rawStdout = exec.rawStdout;
   let stderr = exec.stderr;
   let exitCode = exec.exitCode;
   const extractedFromRaw = extractSessionAndResultFromText(rawStdout);
   let stdout = rawStdout;
   let sessionId = existing?.sessionId ?? "unknown";
-  const rateLimitMessage = extractRateLimitMessage(rawStdout, stderr);
+  const rateLimitMessage = (exitCode !== 0 || extractedFromRaw.error)
+    ? extractRateLimitMessage(rawStdout, stderr) : null;
 
   if (extractedFromRaw.error) {
     exitCode = exitCode || 1;
@@ -963,6 +837,7 @@ async function execClaude(
       claudeSessionId: sessionId,
       userPrompt: prompt,
       assistantReply: stdout,
+      userText,
     });
 
     if (settings.learning?.captureCandidateSkills) {
@@ -985,7 +860,7 @@ async function execClaude(
     `# ${name}`,
     `Date: ${new Date().toISOString()}`,
     `Session: ${sessionId} (${isNew ? "new" : "resumed"})`,
-    `Model config: ${usedFallback ? "fallback" : "primary"}`,
+    "Model config: primary (overload fallback handled by Claude)",
     ...(agentic.enabled ? [`Task type: ${taskType}`, `Routing: ${routingReasoning}`] : []),
     `Exit code: ${result.exitCode}`,
     `Prompt bytes: ${Buffer.byteLength(prompt, "utf8")}`,
@@ -1049,12 +924,14 @@ function prefixUserMessageWithClock(prompt: string): string {
 
 export async function runUserMessage(
   name: string,
-  prompt: string,
+  prompt: string | { text: string; context: string },
   threadId?: SessionInput,
   sink?: StatusSink,
   source: ThreadSource = "cli",
 ): Promise<RunResult> {
-  return run(name, prefixUserMessageWithClock(prompt), threadId, sink, source);
+  const text = typeof prompt === "string" ? prompt : prompt.text;
+  const context = typeof prompt === "string" ? prompt : prompt.context;
+  return enqueue(() => execClaude(name, prefixUserMessageWithClock(context), threadId, sink, source, text), threadId, source);
 }
 
 /**

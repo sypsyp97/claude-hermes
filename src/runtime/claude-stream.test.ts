@@ -31,6 +31,43 @@ async function withScenario(scenario: Record<string, unknown>): Promise<string> 
 }
 
 describe("runClaudeStreaming", () => {
+  test("deadline closes pipes inherited by a background process after the CLI exits", async () => {
+    const script = join(tempRoot, "inherited-pipes.ts");
+    await writeFile(
+      script,
+      `const child = Bun.spawn([process.execPath, "-e", "await Bun.sleep(1800)"], {stdout:"inherit", stderr:"inherit", stdin:"ignore"}); child.unref(); process.exit(0);`
+    );
+    const start = Date.now();
+    const result = await runClaudeStreaming({
+      args: [],
+      cwd: tempRoot,
+      sink: createFakeSink(),
+      taskId: "pipes",
+      label: "pipes",
+      claudeBin: `bun run ${script}`,
+      timeoutMs: 250,
+      killEscalationMs: 20,
+    });
+    expect(result.exitCode).toBe(124);
+    expect(Date.now() - start).toBeLessThan(1500);
+  });
+  test("UTF-8 characters survive arbitrary subprocess chunk boundaries", async () => {
+    const script = join(tempRoot, "unicode.ts");
+    await writeFile(
+      script,
+      `const bytes = new TextEncoder().encode(JSON.stringify({type:"result",subtype:"success",session_id:"unicode",result:"你好🌟"}) + "\\n"); for (const byte of bytes) {process.stdout.write(Uint8Array.of(byte)); await Bun.sleep(1);}`
+    );
+    const result = await runClaudeStreaming({
+      args: [],
+      cwd: tempRoot,
+      sink: createFakeSink(),
+      taskId: "unicode",
+      label: "unicode",
+      claudeBin: `bun run ${script}`,
+    });
+    expect(result.finalResult).toBe("你好🌟");
+    expect(result.stdout).not.toContain("�");
+  });
   test("happy path with one tool_use emits open → task_start → tool events → task_complete → close", async () => {
     const scenarioPath = await withScenario({
       sessionId: "s-1",

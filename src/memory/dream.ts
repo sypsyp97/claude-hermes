@@ -15,7 +15,8 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { crossSessionMemoryFile } from "../paths";
+import { withMemoryFileLock } from "./file-lock";
+import { canonicalWorkspace, crossSessionMemoryFile } from "../paths";
 import type { Database } from "../state/db";
 
 const DAY_MS = 86_400_000;
@@ -51,7 +52,11 @@ export async function runDream(db: Database, opts: DreamOptions = {}): Promise<D
 
   const { digestsCreated, messagesDigested } = digestOldMessages(db, cutoffIso, createdAt);
 
-  const { memoryDedupeCount, memoryInvalidatedCount } = consolidateMemory(opts.cwd);
+  const cwd = canonicalWorkspace(opts.cwd);
+  const { memoryDedupeCount, memoryInvalidatedCount } = await withMemoryFileLock(
+    crossSessionMemoryFile(cwd),
+    () => consolidateMemory(cwd)
+  );
 
   return {
     digestsCreated,

@@ -67,6 +67,10 @@ describe("listSkills", () => {
 });
 
 describe("resolveSkillPrompt", () => {
+  test("Telegram's underscore command resolves the registered hyphenated skill", async () => {
+    await writeSkill(projectSkillsDir, "my-report", "Report instructions");
+    expect(await resolveSkillPrompt("/my_report", roots)).toBe("Report instructions");
+  });
   test("returns null for empty command (just '/')", async () => {
     expect(await resolveSkillPrompt("/", roots)).toBeNull();
   });

@@ -1,4 +1,5 @@
-import type { ChannelPolicy } from "../policy/channel";
+import { canonicalWorkspace } from "../paths";
+import { defaultPolicy, type ChannelPolicy } from "../policy/channel";
 import type { SessionTarget } from "../runtime/session-target";
 import type { Envelope } from "./envelope";
 import { sessionKeyFor } from "./session-key";
@@ -14,7 +15,7 @@ interface BridgeIdentity {
 export function discordSessionTarget(input: BridgeIdentity, policy: ChannelPolicy): SessionTarget {
   const envelope: Envelope = {
     source: "discord",
-    workspace: input.workspace,
+    workspace: canonicalWorkspace(input.workspace),
     guild: input.guildId,
     channel: input.channelId,
     thread: input.isThread ? input.channelId : undefined,
@@ -30,28 +31,41 @@ export function discordSessionTarget(input: BridgeIdentity, policy: ChannelPolic
     key: sessionKeyFor({ envelope, scope: policy.sessionScope }),
     scope: policy.sessionScope,
     source: "discord",
-    workspace: input.workspace,
+    workspace: canonicalWorkspace(input.workspace),
     guild: input.guildId,
     channel: input.channelId,
     thread: envelope.thread,
     user: input.userId,
     memoryScope: policy.memoryScope,
+    policy: { allowedSkills: policy.allowedSkills, modelPolicy: policy.modelPolicy },
   };
 }
 
-export function telegramSessionTarget(input: {
-  workspace: string;
-  chatId: number;
-  userId: number;
-  topicId?: number;
-  isDm: boolean;
-}): SessionTarget {
+export function telegramSessionTarget(
+  input: {
+    workspace: string;
+    chatId: number;
+    userId: number;
+    topicId?: number;
+    isDm: boolean;
+  },
+  policy?: ChannelPolicy
+): SessionTarget {
   const channel = String(input.chatId);
-  const thread = input.topicId === undefined ? undefined : `${channel}:${input.topicId}`;
-  const scope = thread ? "per-thread" : input.isDm ? "per-user" : "per-channel-user";
+  const effective = policy ?? {
+    ...defaultPolicy({ source: "telegram", isDm: input.isDm }),
+    ...(input.topicId !== undefined ? { sessionScope: "per-thread" as const } : {}),
+  };
+  const scope = effective.sessionScope;
+  const thread =
+    input.topicId === undefined
+      ? scope === "per-thread"
+        ? channel
+        : undefined
+      : `${channel}:${input.topicId}`;
   const envelope: Envelope = {
     source: "telegram",
-    workspace: input.workspace,
+    workspace: canonicalWorkspace(input.workspace),
     channel,
     thread,
     user: { id: String(input.userId), isAdmin: false },
@@ -64,10 +78,11 @@ export function telegramSessionTarget(input: {
     key: sessionKeyFor({ envelope, scope }),
     scope,
     source: "telegram",
-    workspace: input.workspace,
+    workspace: canonicalWorkspace(input.workspace),
     channel,
     thread,
     user: envelope.user.id,
-    memoryScope: input.isDm ? "user" : "channel",
+    memoryScope: effective.memoryScope,
+    policy: { allowedSkills: effective.allowedSkills, modelPolicy: effective.modelPolicy },
   };
 }

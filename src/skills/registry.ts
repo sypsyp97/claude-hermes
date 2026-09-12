@@ -44,7 +44,12 @@ export async function resolveSkillPrompt(
     if (globalContent) return globalContent;
   }
 
-  return searchPluginSkills(pluginsDir, skillName, pluginHint);
+  const plugin = await searchPluginSkills(pluginsDir, skillName, pluginHint);
+  if (plugin) return plugin;
+  // Registration flattens separators for Telegram/Discord command menus.
+  const slug = (value: string) => value.toLowerCase().replace(/[-.:]/g, "_");
+  const registered = (await listSkills(roots)).find(skill => slug(skill.name) === slug(name));
+  return registered ? tryReadFile(registered.path) : null;
 }
 
 async function tryReadFile(path: string): Promise<string | null> {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalWorkspace } from "../paths";
 import { resetSharedDbCache } from "../state/shared-db";
 import { sessionAccess, type SessionTarget } from "./session-target";
 
@@ -70,7 +71,7 @@ test("native Claude memory is stable within a conversation and isolated across c
   };
   const args = claudeSessionArgs(target);
   const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
-  expect(settings.autoMemoryDirectory.startsWith(cwd)).toBe(true);
+  expect(settings.autoMemoryDirectory.startsWith(canonicalWorkspace(cwd))).toBe(true);
   expect(claudeSessionArgs(target)).toEqual(args);
   expect(claudeSessionArgs({ ...target, key: "user:telegram:bob" })).not.toEqual(args);
   const noneArgs = claudeSessionArgs({ ...target, memoryScope: "none" });

@@ -1,6 +1,14 @@
-import { ensureProjectClaudeMd, run, runUserMessage, compactCurrentSession, resetCurrentSession } from "../runner";
+import { formatContextUsage } from "../runtime/context-usage";
+import { enqueueBridge } from "../runtime/bridge-queue";
+import { withBridgeSignal } from "../runtime/bridge-context";
+import { downloadBytes } from "../runtime/http";
+import { ensureProjectClaudeMd, run, runUserMessage, compactCurrentSession, resetCurrentSession, forgetCurrentSession } from "../runner";
 import { getSettings, loadSettings } from "../config";
 import { pollUpdates } from "../adapters/telegram/polling";
+import { telegramCheckpoint } from "../adapters/telegram/checkpoint";
+import { resolveTelegramPolicy } from "../adapters/telegram/channel-policy";
+import { getSharedDb } from "../state/shared-db";
+import { isSkillAllowed } from "../policy/channel";
 import { telegramSessionTarget } from "../router/bridge-session";
 import { sessionAccess } from "../runtime/session-target";
 import { telegramApi as callApi, TelegramApiError } from "./telegram-api";
@@ -77,7 +85,6 @@ function markdownToTelegramHtml(text: string): string {
 
 // --- Telegram Bot API (raw fetch, zero deps) ---
 
-const API_BASE = "https://api.telegram.org/bot";
 const FILE_API_BASE = "https://api.telegram.org/file/bot";
 
 interface TelegramUser {
@@ -90,7 +97,7 @@ interface TelegramMessage {
   message_id: number;
   from?: TelegramUser;
   reply_to_message?: { message_id?: number; from?: TelegramUser };
-  chat: { id: number; type: string };
+  chat: { id: number; type: string; is_forum?: boolean };
   message_thread_id?: number;
   text?: string;
   caption?: string;
@@ -281,12 +288,6 @@ function extensionFromAudioMimeType(mimeType?: string): string {
   }
 }
 
-function buildProgressBar(current: number, max: number, width: number = 20): string {
-  const ratio = Math.min(current / max, 1);
-  const filled = Math.round(ratio * width);
-  return "█".repeat(filled) + "░".repeat(width - filled);
-}
-
 function extractTelegramCommand(text: string): string | null {
   const firstToken = text.trim().split(/\s+/, 1)[0];
   if (!firstToken.startsWith("/")) return null;
@@ -322,14 +323,19 @@ function telegramStatusTransport(token: string): TelegramTransport {
 
 async function sendMessage(token: string, chatId: number, text: string, threadId?: number): Promise<void> {
   const normalized = normalizeTelegramText(text).replace(/\[react:[^\]\r\n]+\]/gi, "");
-  const html = markdownToTelegramHtml(normalized);
-  const MAX_LEN = 4096;
-  for (let i = 0; i < html.length; i += MAX_LEN) {
+  const MAX_LEN = 4000;
+  for (let i = 0; i < normalized.length;) {
+    let end = Math.min(i + MAX_LEN, normalized.length);
+    if (end < normalized.length && /[\uD800-\uDBFF]/.test(normalized[end - 1])) end--;
+    const chunk = normalized.slice(i, end);
+    i = end;
+    const html = markdownToTelegramHtml(chunk);
+    const formatted = normalized.length <= MAX_LEN && html.length <= 4096;
     try {
       await callApi(token, "sendMessage", {
         chat_id: chatId,
-        text: html.slice(i, i + MAX_LEN),
-        parse_mode: "HTML",
+        text: formatted ? html : chunk,
+        ...(formatted ? { parse_mode: "HTML" } : {}),
         ...(threadId ? { message_thread_id: threadId } : {}),
       });
     } catch (err) {
@@ -337,7 +343,7 @@ async function sendMessage(token: string, chatId: number, text: string, threadId
       // Telegram explicitly rejected formatting; the original was not sent.
       await callApi(token, "sendMessage", {
         chat_id: chatId,
-        text: normalized.slice(i, i + MAX_LEN),
+        text: chunk,
         ...(threadId ? { message_thread_id: threadId } : {}),
       });
     }
@@ -370,14 +376,7 @@ async function sendDocumentToChat(
   formData.append("document", file, fileName);
   if (threadId) formData.append("message_thread_id", String(threadId));
 
-  const res = await fetch(`${API_BASE}${token}/sendDocument`, {
-    method: "POST",
-    body: formData,
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Telegram sendDocument failed: ${res.status} ${body}`);
-  }
+  await callApi(token, "sendDocument", formData, { timeoutMs: 60_000 });
 }
 
 function extractReactionDirective(text: string): { cleanedText: string; reactionEmoji: string | null } {
@@ -456,8 +455,7 @@ async function downloadImageFromMessage(token: string, message: TelegramMessage)
 
   const remotePath = fileMeta.result.file_path;
   const downloadUrl = `${FILE_API_BASE}${token}/${remotePath}`;
-  const response = await fetch(downloadUrl);
-  if (!response.ok) throw new Error(`Telegram file download failed: ${response.status} ${response.statusText}`);
+  const bytes = await downloadBytes(downloadUrl);
 
   const dir = telegramInboxDir();
   await mkdir(dir, { recursive: true });
@@ -468,7 +466,6 @@ async function downloadImageFromMessage(token: string, message: TelegramMessage)
   const ext = remoteExt || docExt || mimeExt || ".jpg";
   const filename = `${message.chat.id}-${message.message_id}-${Date.now()}${ext}`;
   const localPath = join(dir, filename);
-  const bytes = new Uint8Array(await response.arrayBuffer());
   await Bun.write(localPath, bytes);
   return localPath;
 }
@@ -487,8 +484,7 @@ async function downloadVoiceFromMessage(token: string, message: TelegramMessage)
   debugLog(
     `Voice download: fileId=${fileId} remotePath=${remotePath} mime=${audioLike.mime_type ?? "unknown"} expectedSize=${audioLike.file_size ?? "unknown"}`
   );
-  const response = await fetch(downloadUrl);
-  if (!response.ok) throw new Error(`Telegram file download failed: ${response.status} ${response.statusText}`);
+  const bytes = await downloadBytes(downloadUrl);
 
   const dir = telegramInboxDir();
   await mkdir(dir, { recursive: true });
@@ -500,7 +496,6 @@ async function downloadVoiceFromMessage(token: string, message: TelegramMessage)
   const ext = remoteExt || docExt || audioExt || mimeExt || ".ogg";
   const filename = `${message.chat.id}-${message.message_id}-${Date.now()}${ext}`;
   const localPath = join(dir, filename);
-  const bytes = new Uint8Array(await response.arrayBuffer());
   await Bun.write(localPath, bytes);
   const header = Array.from(bytes.slice(0, 8))
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -533,10 +528,7 @@ async function downloadDocumentFromMessage(
 
   const remotePath = fileMeta.result.file_path;
   const downloadUrl = `${FILE_API_BASE}${token}/${remotePath}`;
-  const response = await fetch(downloadUrl);
-  if (!response.ok) {
-    throw new Error(`Telegram file download failed: ${response.status} ${response.statusText}`);
-  }
+  const bytes = await downloadBytes(downloadUrl);
 
   const dir = telegramInboxDir();
   await mkdir(dir, { recursive: true });
@@ -545,14 +537,20 @@ async function downloadDocumentFromMessage(
   const ext = extname(originalName) || extname(remotePath) || "";
   const filename = `${message.chat.id}-${message.message_id}-${Date.now()}${ext}`;
   const localPath = join(dir, filename);
-  const bytes = new Uint8Array(await response.arrayBuffer());
   await Bun.write(localPath, bytes);
   return { localPath, originalName };
 }
 
-async function handleMyChatMember(update: TelegramMyChatMemberUpdate): Promise<void> {
+export async function handleMyChatMember(update: TelegramMyChatMemberUpdate): Promise<void> {
+  return enqueueBridge("telegram", `${update.chat.id}:main`, () => processMyChatMember(update));
+}
+
+async function processMyChatMember(update: TelegramMyChatMemberUpdate): Promise<void> {
   const config = getSettings().telegram;
   const chat = update.chat;
+  if (!config.allowedUserIds.includes(update.from.id)) return;
+  const policy = resolveTelegramPolicy(await getSharedDb(), chat.id, false);
+  if (policy.mode === "delivery-only" || policy.deliveryRole === "delivery") return;
   if (!botUsername && update.new_chat_member.user.username) botUsername = update.new_chat_member.user.username;
   if (!botId) botId = update.new_chat_member.user.id;
   const oldStatus = update.old_chat_member.status;
@@ -575,7 +573,7 @@ async function handleMyChatMember(update: TelegramMyChatMemberUpdate): Promise<v
     "Write a short first message for the group. It should confirm I was added and explain how to trigger me.";
 
   try {
-    const result = await run("telegram", eventPrompt, telegramSessionTarget({ workspace: process.cwd(), chatId: chat.id, userId: update.from.id, isDm: false }), undefined, "telegram");
+    const result = await run("telegram", eventPrompt, telegramSessionTarget({ workspace: process.cwd(), chatId: chat.id, userId: update.from.id, isDm: false }, policy), undefined, "telegram");
     if (result.exitCode !== 0) {
       await sendMessage(config.token, chat.id, "I was added to this group. Mention me with a command to start.");
       return;
@@ -590,10 +588,14 @@ async function handleMyChatMember(update: TelegramMyChatMemberUpdate): Promise<v
 // --- Message handler ---
 
 export async function handleMessage(message: TelegramMessage): Promise<void> {
+  return enqueueBridge("telegram", `${message.chat.id}:${message.message_thread_id ?? "main"}`, () => processMessage(message));
+}
+
+async function processMessage(message: TelegramMessage): Promise<void> {
   const config = getSettings().telegram;
   const userId = message.from?.id;
   const chatId = message.chat.id;
-  const threadId = message.message_thread_id;
+  let threadId = message.message_thread_id;
   const { text } = getMessageTextAndEntities(message);
   const chatType = message.chat.type;
   const isPrivate = chatType === "private";
@@ -605,12 +607,6 @@ export async function handleMessage(message: TelegramMessage): Promise<void> {
   if (!isPrivate && !isGroup) return;
 
   const triggerReason = isGroup ? groupTriggerReason(message) : "private_chat";
-  if (isGroup && !triggerReason) {
-    debugLog(
-      `Skip group message chat=${chatId} from=${userId ?? "unknown"} reason=no_trigger text="${(text ?? "").slice(0, 80)}"`
-    );
-    return;
-  }
   debugLog(
     `Handle message chat=${chatId} type=${chatType} from=${userId ?? "unknown"} reason=${triggerReason} text="${(text ?? "").slice(0, 80)}"`
   );
@@ -647,7 +643,10 @@ export async function handleMessage(message: TelegramMessage): Promise<void> {
     return;
   }
 
-  const target = telegramSessionTarget({ workspace: process.cwd(), chatId, userId, topicId: threadId, isDm: isPrivate });
+  const policy = resolveTelegramPolicy(await getSharedDb(), chatId, isPrivate, threadId);
+  if (policy.mode === "delivery-only" || policy.deliveryRole === "delivery") return;
+  if (isGroup && !triggerReason && !["listen", "free-response", "shared"].includes(policy.mode)) return;
+  let target = telegramSessionTarget({ workspace: process.cwd(), chatId, userId, topicId: threadId, isDm: isPrivate }, policy);
   const command = text ? extractTelegramCommand(text) : null;
   if (command === "/start") {
     await sendMessage(
@@ -662,6 +661,12 @@ export async function handleMessage(message: TelegramMessage): Promise<void> {
   if (command === "/reset") {
     await resetCurrentSession({ target });
     await sendMessage(config.token, chatId, "This conversation was reset. Next message starts fresh; saved memory is retained.", threadId);
+    return;
+  }
+
+  if (command === "/forget") {
+    await forgetCurrentSession(target);
+    await sendMessage(config.token, chatId, "This conversation's Hermes history, saved facts and native auto memory were erased. Next message starts fresh.", threadId);
     return;
   }
 
@@ -713,43 +718,15 @@ export async function handleMessage(message: TelegramMessage): Promise<void> {
     }
     try {
       const raw = await readFile(jsonlPath, "utf8");
-      const fileLines = raw.trim().split("\n");
-      let lastUsage: any = null;
-      let totalOutput = 0;
-      for (const line of fileLines) {
-        try {
-          const obj = JSON.parse(line);
-          if (obj.message?.usage) lastUsage = obj.message.usage;
-          if (obj.message?.usage?.output_tokens) totalOutput += obj.message.usage.output_tokens;
-        } catch {}
-      }
-      if (!lastUsage) {
-        await sendMessage(config.token, chatId, "No usage data found.", threadId);
-        return;
-      }
-      const input = lastUsage.input_tokens ?? 0;
-      const cacheCreation = lastUsage.cache_creation_input_tokens ?? 0;
-      const cacheRead = lastUsage.cache_read_input_tokens ?? 0;
-      const totalContext = input + cacheCreation + cacheRead;
-      const maxContext = 200000;
-      const pct = ((totalContext / maxContext) * 100).toFixed(1);
-      const bar = buildProgressBar(totalContext, maxContext);
-      const msg = [
-        `📐 **Context Window**`,
-        `${bar} ${pct}%`,
-        ``,
-        `Total: \`${totalContext.toLocaleString()}\` / \`${maxContext.toLocaleString()}\` tokens`,
-        `├ Input: \`${input.toLocaleString()}\``,
-        `├ Cache creation: \`${cacheCreation.toLocaleString()}\``,
-        `├ Cache read: \`${cacheRead.toLocaleString()}\``,
-        `└ Output (cumulative): \`${totalOutput.toLocaleString()}\``,
-        ``,
-        `Turns: ${session.turnCount ?? 0}`,
-      ];
-      await sendMessage(config.token, chatId, msg.join("\n"), threadId);
+      await sendMessage(config.token, chatId, formatContextUsage(raw, session.turnCount ?? 0), threadId);
     } catch (err) {
       await sendMessage(config.token, chatId, `Failed to read context: ${err instanceof Error ? err.message : err}`, threadId);
     }
+    return;
+  }
+
+  if (command && !isSkillAllowed(policy, command)) {
+    await sendMessage(config.token, chatId, `Skill ${command} is not allowed in this conversation.`, threadId);
     return;
   }
 
@@ -764,6 +741,17 @@ export async function handleMessage(message: TelegramMessage): Promise<void> {
   const typingInterval = setInterval(() => sendTyping(config.token, chatId, threadId), 4000);
 
   try {
+    if (isGroup && policy.autoThread && threadId === undefined) {
+      if (!message.chat.is_forum) {
+        await sendMessage(config.token, chatId, "autoThread requires a Telegram forum supergroup. Enable topics or disable autoThread for this chat.");
+        return;
+      }
+      const topic = await callApi<{result:{message_thread_id:number}}>(config.token, "createForumTopic", {
+        chat_id: chatId, name: (text.trim() || `${label}'s conversation`).slice(0,100),
+      });
+      threadId = topic.result.message_thread_id;
+      target = telegramSessionTarget({workspace:process.cwd(),chatId,userId,topicId:threadId,isDm:false},resolveTelegramPolicy(await getSharedDb(),chatId,false,threadId));
+    }
     await sendTyping(config.token, chatId, threadId);
     let imagePath: string | null = null;
     let voicePath: string | null = null;
@@ -862,7 +850,7 @@ export async function handleMessage(message: TelegramMessage): Promise<void> {
       ...(threadId !== undefined && { threadId }),
     });
     const threadArg = target;
-    const result = await runUserMessage("telegram", prefixedPrompt, threadArg, statusSink, "telegram");
+    const result = await runUserMessage("telegram", {text: text || voiceTranscript || "", context: prefixedPrompt}, threadArg, statusSink, "telegram");
 
     if (result.exitCode !== 0) {
       await sendMessage(config.token, chatId, `Error (exit ${result.exitCode}): ${result.stderr || "Unknown error"}`, threadId);
@@ -932,6 +920,7 @@ async function registerBotCommands(token: string): Promise<void> {
     const commands = [
       { command: "start", description: "Show welcome message" },
       { command: "reset", description: "Reset session and start fresh" },
+      { command: "forget", description: "Erase this conversation's saved memory and history" },
       { command: "compact", description: "Compact session to reduce context size" },
       { command: "status", description: "Show current session status" },
       { command: "context", description: "Show context window usage" },
@@ -957,7 +946,7 @@ async function registerBotCommands(token: string): Promise<void> {
     } catch (regErr) {
       // Skill-generated commands may violate Telegram constraints; retry with built-in commands only
       console.warn(`[Telegram] Full command registration failed, retrying with built-in commands only: ${regErr instanceof Error ? regErr.message : regErr}`);
-      const builtinOnly = commands.filter((c) => ["start", "reset", "compact", "status", "context"].includes(c.command));
+      const builtinOnly = commands.filter((c) => ["start", "reset", "forget", "compact", "status", "context"].includes(c.command));
       await callApi(token, "setMyCommands", { commands: builtinOnly });
       console.log(`  Commands registered (built-in only): ${builtinOnly.length}`);
     }
@@ -969,18 +958,18 @@ async function registerBotCommands(token: string): Promise<void> {
 // --- Polling loop ---
 
 let pollingController: AbortController | null = null;
-let pollingOffset = 0;
-let pollingToken: string | null = null;
 
-async function poll(signal: AbortSignal): Promise<void> {
+export async function poll(signal: AbortSignal): Promise<void> {
   const config = getSettings().telegram;
-  if (pollingToken !== config.token) { pollingOffset = 0; pollingToken = config.token; }
+  // A Telegram token's prefix is the bot ID, stable across token rotation.
+  let account = config.token.split(":", 1)[0];
   try {
     const me = await callApi<{ ok: boolean; result: TelegramMe }>(config.token, "getMe", undefined, { signal });
     if (signal.aborted) return;
     if (me.ok) {
       botUsername = me.result.username ?? null;
       botId = me.result.id;
+      account = String(me.result.id);
       console.log(`  Bot: ${botUsername ? `@${botUsername}` : botId}`);
       console.log(`  Group privacy: ${me.result.can_read_all_group_messages ? "disabled (reads all messages)" : "enabled (commands & mentions only)"}`);
     }
@@ -989,6 +978,29 @@ async function poll(signal: AbortSignal): Promise<void> {
   }
 
   if (signal.aborted) return;
+  const db = await getSharedDb();
+  const checkpoint = telegramCheckpoint(db, account);
+  for (const receipt of checkpoint.pending()) {
+    if (signal.aborted) return;
+    const authorized = receipt.userId !== undefined && config.allowedUserIds.includes(receipt.userId);
+    const policy = receipt.chatId === undefined ? null : resolveTelegramPolicy(db, receipt.chatId, receipt.isDm ?? false, receipt.topicId);
+    const triggered = receipt.isDm || receipt.triggered || (policy && ["listen", "free-response", "shared"].includes(policy.mode));
+    if (!authorized || !triggered || !policy || policy.mode === "delivery-only" || policy.deliveryRole === "delivery") {
+      checkpoint.complete(receipt.updateId);
+      continue;
+    }
+    try {
+      await callApi(config.token, "sendMessage", {
+        chat_id: receipt.chatId,
+        text: "An earlier request was interrupted or its delivery was not confirmed when Hermes restarted. It may have partially run. Check its effects before sending it again.",
+        ...(receipt.messageId === undefined ? {} : { reply_parameters: { message_id: receipt.messageId, allow_sending_without_reply: true } }),
+        ...(receipt.topicId === undefined ? {} : { message_thread_id: receipt.topicId }),
+      }, { signal });
+      checkpoint.complete(receipt.updateId);
+    } catch (err) {
+      console.error(`[Telegram] Recovery notice failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
   console.log("Telegram bot started (long polling)");
   console.log(`  Allowed users: ${config.allowedUserIds.length === 0 ? "none (fail-closed)" : config.allowedUserIds.join(", ")}`);
   if (telegramDebug) console.log("  Debug: enabled");
@@ -997,7 +1009,17 @@ async function poll(signal: AbortSignal): Promise<void> {
   registerBotCommands(config.token).catch(() => {});
 
   await pollUpdates<TelegramUpdate>({
-    signal, initialOffset: pollingOffset, onOffset: offset => { pollingOffset = offset; },
+    signal, getOffset: checkpoint.offset,
+    admit: update => {
+      const message = update.message;
+      // Non-message updates still advance the durable checkpoint, but carry no
+      // reply destination. Never persist the user's message body or credentials.
+      checkpoint.admit({ updateId: update.update_id, ...(message ? {
+        chatId: message.chat.id, userId: message.from?.id, messageId: message.message_id,
+        topicId: message.message_thread_id, isDm: message.chat.type === "private",
+        triggered: Boolean(groupTriggerReason(message)),
+      } : {}) });
+    },
     request: async offset => {
       const data = await callApi<{ ok: boolean; result: TelegramUpdate[] }>(config.token, "getUpdates",
         { offset, timeout: 30, allowed_updates: ["message", "my_chat_member", "callback_query"] },
@@ -1008,6 +1030,7 @@ async function poll(signal: AbortSignal): Promise<void> {
       if (update.message) await handleMessage(update.message);
       if (update.my_chat_member) await handleMyChatMember(update.my_chat_member);
       if (update.callback_query) await handleCallbackQuery(update.callback_query);
+      checkpoint.complete(update.update_id);
     },
     onError: err => console.error(`[Telegram] Poll error: ${err instanceof Error ? err.message : err}`),
   });
@@ -1033,7 +1056,7 @@ export function startPolling(debug = false): void {
   pollingController = controller;
   (async () => {
     await ensureProjectClaudeMd();
-    if (!controller.signal.aborted) await poll(controller.signal);
+    if (!controller.signal.aborted) await withBridgeSignal(controller.signal, () => poll(controller.signal));
   })().catch((err) => {
     console.error(`[Telegram] Fatal: ${err}`);
   });
@@ -1045,5 +1068,6 @@ export async function telegram() {
   await ensureProjectClaudeMd();
   stopPolling();
   pollingController = new AbortController();
-  await poll(pollingController.signal);
+  const signal = pollingController.signal;
+  await withBridgeSignal(signal, () => poll(signal));
 }

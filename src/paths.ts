@@ -13,7 +13,26 @@
  * these values into `const`s at module load time in consumers.
  */
 
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
+
+/** Physical workspace identity; synthetic/nonexistent paths remain deterministic. */
+export function canonicalWorkspace(cwd: string = process.cwd()): string {
+  try {
+    return realpathSync(cwd);
+  } catch {
+    return resolve(cwd);
+  }
+}
+
+export function nativeMemoryDirectory(workspace: string, sessionKey: string): string {
+  return join(
+    hermesDir(canonicalWorkspace(workspace)),
+    "claude-memory",
+    createHash("sha256").update(sessionKey).digest("hex")
+  );
+}
 
 export const HERMES_DIR_NAME = "hermes";
 export const LEGACY_DIR_NAME = "claudeclaw";

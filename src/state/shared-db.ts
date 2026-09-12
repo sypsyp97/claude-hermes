@@ -21,7 +21,7 @@ import { basename, dirname, join } from "node:path";
 import { applyMigrations } from "./bootstrap";
 import { type Database, openDb } from "./db";
 import { importLegacyJson } from "./import-json";
-import { stateDbFile } from "../paths";
+import { canonicalWorkspace, stateDbFile } from "../paths";
 
 const cache = new Map<string, Promise<Database>>();
 const pathByHandle = new WeakMap<Database, string>();
@@ -53,6 +53,16 @@ export function getSharedDb(cwd: string = process.cwd()): Promise<Database> {
       // If the legacy JSON is malformed, swallow and continue. Better to
       // serve an empty SQLite than to refuse to open the DB at all.
     }
+    // Existing bridge rows may predate physical-path normalization.
+    db.transaction(() => {
+      for (const row of db
+        .query<{ workspace: string }, []>("SELECT DISTINCT workspace FROM sessions")
+        .all()) {
+        const normalized = canonicalWorkspace(row.workspace);
+        if (normalized !== row.workspace)
+          db.prepare("UPDATE sessions SET workspace = ? WHERE workspace = ?").run(normalized, row.workspace);
+      }
+    })();
     return db;
   })();
   cache.set(path, promise);

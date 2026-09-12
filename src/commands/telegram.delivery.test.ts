@@ -2,6 +2,17 @@ import { afterEach, expect, test } from "bun:test";
 import { sendMessage } from "./telegram";
 
 const originalFetch = globalThis.fetch;
+test("split boundaries do not reinterpret literal Markdown as formatting", async () => {
+  const delivered: string[] = [];
+  globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+    const body = JSON.parse(String(init.body));
+    delivered.push(body.text);
+    return Response.json({ ok: true, result: { message_id: delivered.length } });
+  }) as unknown as typeof fetch;
+  const input = "a".repeat(4000) + "> literal";
+  await sendMessage("fake", 1, input);
+  expect(delivered.join("")).toBe(input);
+});
 afterEach(() => {
   globalThis.fetch = originalFetch;
 });
@@ -36,4 +47,22 @@ test("Telegram API errors inside HTTP 200 are surfaced", async () => {
   globalThis.fetch = (async () =>
     Response.json({ ok: false, error_code: 403, description: "Forbidden" })) as unknown as typeof fetch;
   await expect(sendMessage("fake-token", 1, "hello")).rejects.toThrow("403");
+});
+
+test("long messages retain every source character through formatting rejection", async () => {
+  const delivered: string[] = [];
+  globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+    const body = JSON.parse(String(init.body));
+    if (body.parse_mode)
+      return Response.json(
+        { ok: false, error_code: 400, description: "can't parse entities" },
+        { status: 400 }
+      );
+    delivered.push(body.text);
+    return Response.json({ ok: true, result: { message_id: delivered.length } });
+  }) as unknown as typeof fetch;
+  const input = "<&>".repeat(2000) + "END";
+  await sendMessage("fake", 1, input);
+  expect(delivered.join("")).toBe(input);
+  expect(delivered.every((chunk) => chunk.length > 0 && chunk.length <= 4096)).toBe(true);
 });

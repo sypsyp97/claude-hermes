@@ -31,9 +31,11 @@ Run `claude update` before upgrading Hermes. The audited current version is
 | Result errors | JSON on new and resumed buffered turns; `is_error` and `error_*` results fail even when the child exits zero |
 | System-prompt snapshot | Disable it so newly retrieved memory takes effect on resumed turns |
 | Auto memory | Inline `--settings` selects an absolute, hashed directory per bridge conversation; `memoryScope: none` sets `autoMemoryEnabled: false` |
-| Tool availability | `locked` uses `--tools Read,Grep,Glob`; `--allowedTools` remains an approval rule |
+| Tool availability | `locked` uses `--tools Read,Grep,Glob` and denies `mcp__*`; `--allowedTools` remains an approval rule |
 | Subagents | Recognize current `Agent` and legacy `Task`; nested text does not become the parent reply |
-| Plugins, skills, hooks and MCP | Retain native discovery/configuration; no second agent loop is added |
+| Plugins, skills, hooks and MCP | Retain native discovery/configuration on unrestricted skill policies. Restricted policies disable native slash-command/Skill discovery and inject only explicitly allowed bridge skill bodies; Telegram underscore aliases resolve to discovered skills. No second agent loop is added |
+| Fallback | Native `--fallback-model` within the same provider credentials; no whole-task replay across providers |
+| Context capacity | `/context` reads reported model limits, otherwise displays “not reported”; cumulative assistant usage is deduplicated |
 
 Sources: [CLI reference](https://code.claude.com/docs/en/cli-reference),
 [headless usage](https://code.claude.com/docs/en/headless),
@@ -49,22 +51,32 @@ user/managed settings. Tests verify configuration and routing, not model behavio
   retires stale callbacks. Missing HELLO/heartbeat ACK reconnects with backoff and
   jitter. Resume retains the sequence and versioned URL; invalid session codes
   identify afresh, fatal configuration codes stop. Duplicate sequences are ignored.
-- Live Discord handlers enforce channel mode, session scope, memory scope and
-  delivery role. Threads inherit parent policy; local overrides win. Authorized
-  slash commands defer before channel lookup or queued work.
+- Live Discord and Telegram handlers enforce channel mode, session/memory scope,
+  delivery role, allowed skills and model policy. Threads/topics inherit parent
+  policy; local overrides win. Auto-thread creation and continuation use the same
+  resolved policy, including explicit shared scope. Discord slash commands defer
+  before channel lookup or queued work; skill replies follow the new thread.
+  Telegram membership events obey the same authorization and delivery policy.
 - Telegram requests have deadlines including response-body reads. Explicit 429s
   honor `retry_after`; safe reads retry transient failures with a bounded budget.
   Ambiguous send failures are surfaced. Plain-text fallback requires an explicit
   formatting rejection, preventing duplicate sends after network failures.
-- Telegram polling continues during agent turns, advances offsets monotonically,
-  and suppresses repeated updates within the process. Stop/token changes abort
-  pending reads and retry waits.
+- Telegram polling continues during agent turns. Receipt metadata and offsets are
+  committed atomically to the existing SQLite `kv` table before acknowledgement.
+  A restart reports uncertain requests instead of rerunning their tools. Receipts
+  contain no message bodies; completed receipts are removed. Idle offsets expire
+  after seven days because Telegram may randomize the next update ID. Stop/token
+  changes abort pending reads, retry waits and execution-budget admissions.
 - Reset and compact share the addressed execution lane. Reset retains long-term
   history. Archiving a Discord thread preserves context and reconnect skips it.
   Deletion waits for admitted runner work and removes attributed SQLite facts,
   preventing `ON DELETE SET NULL` from turning private facts into shared facts.
-- Timed-out children exit before their lane is released. Tasks are not automatically
-  compacted and replayed because their side effects may already have occurred.
+- Admission lanes reserve arrival order before asynchronous metadata and attachment
+  work. Buffered/streamed Claude and local STT share a four-process budget. Queued
+  admissions are cancellable. Timed-out children exit before their slot is released;
+  inherited pipes cannot indefinitely pin a streaming turn after the CLI exits.
+  Speech recognition uses asynchronous subprocesses or deadline-bounded HTTP.
+  Tasks are not automatically compacted and replayed after uncertain outcomes.
 
 Protocol references: [Discord Gateway](https://docs.discord.com/developers/events/gateway),
 [interaction responses](https://docs.discord.com/developers/interactions/receiving-and-responding),
@@ -84,6 +96,14 @@ excerpts are labeled as data and include message IDs. Scoped chats omit shared
 USER/MEMORY files and scratchpad blocks unless workspace sharing is selected.
 `none` disables automatic memory injection, not transcript persistence.
 
+Successful human turns also extract conservative explicit facts (including Chinese
+“记住”), persist their session provenance and recall them on subsequent turns.
+Independent note keys use content identity; mutable facts use their named key.
+Dream digests return only to their exact conversation/workspace. Shared Markdown
+appends and Dream consolidation use one file mutex. Workspace aliases resolve to
+the same physical identity. `/forget` erases that conversation’s Hermes transcript,
+facts, digests and native auto-memory; `/reset` preserves long-term memory.
+
 This remains a trusted personal-assistant workspace. Prompt selection and native
 memory directories are **not an OS sandbox**: project CLAUDE.md, hooks, MCP, skills
 and accessible files remain shared configuration. This is not a multi-tenant
@@ -92,9 +112,9 @@ hosting isolation boundary.
 ## TDD and verification
 
 Baseline full verify: **1,123 unit + 23 smoke + 60 integration tests**.
-Final local verify: **1,152 unit + 23 smoke + 69 integration tests**, all green
-on Linux with Bun 1.3.4 (38 additional tests). GitHub CI runs the four-way
-Ubuntu/macOS and pinned/latest-Bun matrix; real-service acceptance remains separate.
+The current test counts and independent-review outcome are recorded in the PR.
+GitHub CI runs the four-way Ubuntu/macOS and pinned/latest-Bun matrix;
+real-service acceptance remains separate.
 Behavioral failures were reproduced before implementation for memory recall and
 provenance, transport retry/cancellation, channel inheritance, stream/result parsing,
 locked tool availability, timeout replay, archival, deleted fact provenance and
@@ -115,17 +135,22 @@ Key tests: `runtime-digest.recall.test.ts`, `gateway.test.ts`, `polling.test.ts`
 Run `bun run verify --json` for the authoritative five-stage result.
 No dependency, schema migration, disabled test or relaxed gate is required.
 
-## Remaining architectural work
+## Deployment boundaries
 
-A multi-user service additionally needs durable inbound/outbound ledgers, a global
-execution budget, scoped retention/erasure of native transcripts and memory, and
-process/filesystem isolation. In-memory queues and polling offsets do not guarantee
-exactly-once delivery through a crash. Attachment preparation can affect admission
-order before work reaches the runner queue.
+This patch retains Bun, SQLite and the installed Claude CLI. It adds no dependency,
+schema migration, background recovery worker or second agent framework. In-memory
+Discord admission and Telegram receipt recovery do not provide exactly-once
+execution or delivery through a crash. A Telegram recovery notice can itself have
+an uncertain delivery outcome; it never automatically re-executes the agent task.
 
-Channel-policy `autoThread`, `allowedSkills` and `modelPolicy` still need complete
-live handler enforcement beyond the routing/memory/delivery fields above. Native
-background agents, Remote Control, same-turn steering and permission-mode changes
-need separate lifecycle designs. Existing `/context` capacity estimates should
-eventually use model-reported limits. This branch does not claim full feature
-parity with every referenced framework.
+Hermes erasure does not remove Claude-owned original transcripts outside Hermes's
+state, project-wide shared memory/configuration or external side effects. Cold STT
+model provisioning remains an installation concern. Native background agents,
+Remote Control, same-turn steering, permission-mode changes and multi-tenant OS
+isolation are separate features, not claimed as implemented by this patch.
+
+Fresh reviewers receive only the repository/worktree and review scope, without
+prior conversation or repair rationale. Each actionable finding is reproduced with
+a regression test, repaired and passed through full verify before a new review.
+The stopping condition is no actionable finding in the final independent review,
+not a claim that a nontrivial program is provably bug-free.

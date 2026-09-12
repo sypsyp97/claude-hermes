@@ -92,6 +92,12 @@ export function deliveryPolicy(): ChannelPolicy {
   return clonePolicy(DELIVERY_DEFAULT);
 }
 
+/** Policies name bridge command slugs; accept platform spelling of separators. */
+export function isSkillAllowed(policy: Pick<ChannelPolicy, "allowedSkills">, command: string): boolean {
+  const slug = (name: string) => name.replace(/^\//, "").toLowerCase().replace(/[-.:]/g, "_");
+  return policy.allowedSkills === "*" || policy.allowedSkills.some((name) => slug(name) === slug(command));
+}
+
 export function mergePolicy(base: ChannelPolicy, override: Partial<ChannelPolicy>): ChannelPolicy {
   const merged: ChannelPolicy = { ...base, ...override };
   // Make sure overrides also produce an independent copy of any array/object.

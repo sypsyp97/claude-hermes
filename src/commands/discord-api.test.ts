@@ -154,12 +154,12 @@ describe("discordApi — 429 rate limit", () => {
 });
 
 describe("discordApi — 5xx exponential backoff", () => {
-  test("500 then 200: one retry with base backoff, returns parsed", async () => {
+  test("safe read: 500 then 200 retries with base backoff", async () => {
     const { fetch, recorded } = makeFakeFetch([
       textResponse(500, "Internal Server Error"),
       jsonResponse(200, { id: "x" }),
     ]);
-    const result = await discordApi<{ id: string }>("tok", "POST", "/x", undefined, {
+    const result = await discordApi<{ id: string }>("tok", "GET", "/x", undefined, {
       fetch,
       sleep: makeFakeSleep(recorded),
       baseBackoffMs: 100,
@@ -315,6 +315,45 @@ describe("discordApi — network errors", () => {
     expect(recorded.fetchCalls.length).toBe(3);
     expect(recorded.sleeps).toEqual([5, 10]);
   });
+});
+
+test("ambiguous writes and server errors are surfaced without replay", async () => {
+  for (const failure of [
+    new Error("connection lost after acceptance"),
+    textResponse(503, "unknown outcome"),
+  ]) {
+    const { fetch, recorded } = makeFakeFetch([failure, jsonResponse(200, { id: "duplicate" })]);
+    await expect(
+      discordApi(
+        "fake",
+        "POST",
+        "/channels/c/messages",
+        { content: "once" },
+        {
+          fetch,
+          sleep: makeFakeSleep(recorded),
+        }
+      )
+    ).rejects.toThrow();
+    expect(recorded.fetchCalls).toHaveLength(1);
+  }
+});
+
+test("the deadline includes an unresponsive response body", async () => {
+  const response = new Response(new ReadableStream({ start() {} }));
+  const result = discordApi("fake", "GET", "/x", undefined, {
+    fetch: async () => response,
+    timeoutMs: 10,
+    maxRetries: 0,
+  });
+  const outcome = await Promise.race([
+    result.then(
+      () => "completed",
+      () => "timed out"
+    ),
+    Bun.sleep(80).then(() => "hung"),
+  ]);
+  expect(outcome).toBe("timed out");
 });
 
 describe("discordApi — defaults", () => {

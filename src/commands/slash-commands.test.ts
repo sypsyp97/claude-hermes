@@ -10,7 +10,7 @@ import { describe, expect, test } from "bun:test";
 import { buildSlashCommandList, HARDCODED_COMMANDS } from "./slash-commands";
 import type { SkillInfo } from "../skills/discovery";
 
-const HARDCODED_NAMES = ["start", "reset", "compact", "status", "context"];
+const HARDCODED_NAMES = ["start", "reset", "forget", "compact", "status", "context"];
 const DISCORD_NAME_RE = /^[a-z0-9_-]{1,32}$/;
 
 function skill(overrides: Partial<SkillInfo> = {}): SkillInfo {
@@ -24,7 +24,7 @@ function skill(overrides: Partial<SkillInfo> = {}): SkillInfo {
 }
 
 describe("HARDCODED_COMMANDS", () => {
-  test("exposes the 5 hardcoded Discord commands in deterministic order", () => {
+  test("exposes the 6 hardcoded Discord commands in deterministic order", () => {
     expect(HARDCODED_COMMANDS.map((c) => c.name)).toEqual(HARDCODED_NAMES);
   });
 
@@ -39,9 +39,9 @@ describe("HARDCODED_COMMANDS", () => {
 });
 
 describe("buildSlashCommandList — hardcoded baseline", () => {
-  test("with no skills returns exactly the 5 hardcoded commands", () => {
+  test("with no skills returns exactly the 6 hardcoded commands", () => {
     const out = buildSlashCommandList([]);
-    expect(out).toHaveLength(5);
+    expect(out).toHaveLength(6);
     expect(out.map((c) => c.name)).toEqual(HARDCODED_NAMES);
     for (const cmd of out) {
       expect(cmd.type).toBe(1);
@@ -61,11 +61,11 @@ describe("buildSlashCommandList — hardcoded baseline", () => {
 });
 
 describe("buildSlashCommandList — appending skills", () => {
-  test("appends a plain valid skill after the 5 hardcoded commands", () => {
+  test("appends a plain valid skill after the 6 hardcoded commands", () => {
     const out = buildSlashCommandList([skill({ name: "mytool", description: "does stuff" })]);
-    expect(out).toHaveLength(6);
-    expect(out.slice(0, 5).map((c) => c.name)).toEqual(HARDCODED_NAMES);
-    expect(out[5]).toEqual({
+    expect(out).toHaveLength(7);
+    expect(out.slice(0, 6).map((c) => c.name)).toEqual(HARDCODED_NAMES);
+    expect(out[6]).toEqual({
       name: "mytool",
       description: "does stuff",
       type: 1,
@@ -92,7 +92,7 @@ describe("buildSlashCommandList — slugification", () => {
       skill({ name: "foo/bar", description: "b" }),
       skill({ name: "foo.bar", description: "c" }),
     ]);
-    const names = out.slice(5).map((c) => c.name);
+    const names = out.slice(6).map((c) => c.name);
     expect(names).toContain("hello_world");
     expect(names).toContain("foo_bar");
     // "foo.bar" also slugs to "foo_bar" — collision with the previous skill,
@@ -105,7 +105,7 @@ describe("buildSlashCommandList — slugification", () => {
 
   test("skill whose slug becomes empty is skipped", () => {
     const out = buildSlashCommandList([skill({ name: "🔥" })]);
-    expect(out).toHaveLength(5);
+    expect(out).toHaveLength(6);
     expect(out.map((c) => c.name)).toEqual(HARDCODED_NAMES);
   });
 
@@ -122,7 +122,7 @@ describe("buildSlashCommandList — slugification", () => {
 describe("buildSlashCommandList — collisions", () => {
   test("skill whose slug equals a hardcoded name is dropped", () => {
     const out = buildSlashCommandList([skill({ name: "compact", description: "user override" })]);
-    expect(out).toHaveLength(5);
+    expect(out).toHaveLength(6);
     expect(out.map((c) => c.name)).toEqual(HARDCODED_NAMES);
     // The surviving "compact" must be the hardcoded one, not the skill's.
     const compact = out.find((c) => c.name === "compact");
@@ -134,7 +134,7 @@ describe("buildSlashCommandList — collisions", () => {
       skill({ name: "foo", description: "first" }),
       skill({ name: "FOO", description: "second" }),
     ]);
-    expect(out).toHaveLength(6);
+    expect(out).toHaveLength(7);
     const fooEntries = out.filter((c) => c.name === "foo");
     expect(fooEntries).toHaveLength(1);
     expect(fooEntries[0]?.description).toBe("first");
@@ -170,10 +170,10 @@ describe("buildSlashCommandList — total cap", () => {
     const skills = Array.from({ length: 200 }, (_, i) => skill({ name: `skill${i}`, description: "d" }));
     const out = buildSlashCommandList(skills);
     expect(out).toHaveLength(100);
-    // First 5 entries must still be the hardcoded commands in order.
-    expect(out.slice(0, 5).map((c) => c.name)).toEqual(HARDCODED_NAMES);
-    // Remaining 95 are skill slots.
-    expect(out.length - 5).toBe(95);
+    // First 6 entries must still be the hardcoded commands in order.
+    expect(out.slice(0, 6).map((c) => c.name)).toEqual(HARDCODED_NAMES);
+    // Remaining 94 are skill slots.
+    expect(out.length - 6).toBe(94);
     // Every entry must still be Discord-safe.
     for (const cmd of out) {
       expect(cmd.type).toBe(1);

@@ -13,6 +13,8 @@
 
 import { spawn } from "node:child_process";
 import { claudeArgv } from "./claude-cli";
+import { bridgeSignal } from "./bridge-context";
+import { withExecutionSlot } from "./execution-budget";
 import type { StatusSink } from "../status/sink";
 import { createStreamParser, type StatusEvent } from "../status/stream";
 
@@ -31,6 +33,8 @@ export interface StreamingOptions {
    */
   killEscalationMs?: number;
   claudeBin?: string;
+  signal?: AbortSignal;
+  onEvent?: (event: StatusEvent) => void;
 }
 
 export interface StreamingResult {
@@ -47,6 +51,13 @@ const DEFAULT_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_KILL_ESCALATION_MS = 5000;
 
 export async function runClaudeStreaming(opts: StreamingOptions): Promise<StreamingResult> {
+  const signal = opts.signal ?? bridgeSignal();
+  return withExecutionSlot(() => stream({ ...opts, signal }), signal);
+}
+
+async function stream(opts: StreamingOptions): Promise<StreamingResult> {
+  const signal = opts.signal ?? bridgeSignal();
+  signal?.throwIfAborted();
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const killEscalationMs = opts.killEscalationMs ?? DEFAULT_KILL_ESCALATION_MS;
   const [bin, ...prefix] = claudeArgv({ override: opts.claudeBin, env: opts.env });
@@ -66,6 +77,7 @@ export async function runClaudeStreaming(opts: StreamingOptions): Promise<Stream
   }
 
   const started = Date.now();
+  signal?.throwIfAborted();
   return new Promise<StreamingResult>((resolveOuter) => {
     const proc = spawn(bin, args, {
       cwd: opts.cwd,
@@ -81,7 +93,20 @@ export async function runClaudeStreaming(opts: StreamingOptions): Promise<Stream
     let errorShort: string | undefined;
 
     let killTimer: ReturnType<typeof setTimeout> | null = null;
-    const timer = setTimeout(() => {
+    let interruptedCode: number | undefined;
+    let exited = false;
+    const closeInterruptedPipes = () => {
+      if (!exited || interruptedCode === undefined) return;
+      // Descendants may inherit these pipes after the direct CLI child exits.
+      // Cancellation must not wait for those unrelated handles to close.
+      proc.stdout?.destroy();
+      proc.stderr?.destroy();
+    };
+    const interrupt = (code: number, message: string) => {
+      if (interruptedCode !== undefined) return;
+      interruptedCode = code;
+      stderr += message;
+      closeInterruptedPipes();
       try {
         proc.kill("SIGTERM");
       } catch {}
@@ -91,7 +116,14 @@ export async function runClaudeStreaming(opts: StreamingOptions): Promise<Stream
         } catch {}
       }, killEscalationMs);
       if (typeof killTimer.unref === "function") killTimer.unref();
-    }, timeoutMs);
+    };
+    const timer = setTimeout(
+      () => interrupt(124, `Claude session timed out after ${timeoutMs / 1000}s`),
+      timeoutMs
+    );
+    const onAbort = () => interrupt(130, "Claude session cancelled");
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
 
     async function handleEvents(events: StatusEvent[]): Promise<void> {
       for (const event of events) {
@@ -104,6 +136,7 @@ export async function runClaudeStreaming(opts: StreamingOptions): Promise<Stream
           errorShort = event.message;
         }
         try {
+          opts.onEvent?.(event);
           await opts.sink.update(event);
         } catch {
           // sink failures must never kill the Claude process
@@ -112,14 +145,15 @@ export async function runClaudeStreaming(opts: StreamingOptions): Promise<Stream
     }
 
     let pendingEvents = Promise.resolve();
-    proc.stdout?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8");
+    proc.stdout?.setEncoding("utf8");
+    proc.stderr?.setEncoding("utf8");
+    proc.stdout?.on("data", (text: string) => {
       stdout += text;
       const events = parser.push(text);
       pendingEvents = pendingEvents.then(() => handleEvents(events));
     });
-    proc.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+    proc.stderr?.on("data", (text: string) => {
+      stderr += text;
     });
 
     let finalized = false;
@@ -127,11 +161,12 @@ export async function runClaudeStreaming(opts: StreamingOptions): Promise<Stream
       if (finalized) return;
       finalized = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       if (killTimer) clearTimeout(killTimer);
       await pendingEvents;
       await handleEvents(parser.flush());
-      const ok = processOk && !errorShort;
-      const exitCode = errorShort ? processExitCode || 1 : processExitCode;
+      const ok = processOk && !errorShort && interruptedCode === undefined;
+      const exitCode = interruptedCode ?? (errorShort ? processExitCode || 1 : processExitCode);
       const closeErrorShort = ok
         ? undefined
         : (errorShort ?? (stderr ? stderr.trim().slice(-200) : undefined));
@@ -155,6 +190,10 @@ export async function runClaudeStreaming(opts: StreamingOptions): Promise<Stream
       resolveOuter(outResult);
     }
 
+    proc.on("exit", () => {
+      exited = true;
+      closeInterruptedPipes();
+    });
     proc.on("close", (code) => {
       const exitCode = code ?? -1;
       void finalize(exitCode, exitCode === 0);
