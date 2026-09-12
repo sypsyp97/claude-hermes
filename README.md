@@ -153,3 +153,14 @@ The memory layer borrows ideas from several open-source agent-memory projects:
 - **`(SKILL.md + description + trajectory)` skill library with FTS retrieval** — [Voyager](https://github.com/MineDojo/Voyager)'s skill library pattern.
 - **Importance · recency · relevance scoring** — the Stanford Generative Agents paper ([Park et al., 2023](https://arxiv.org/abs/2304.03442)).
 - **Episodic + semantic split, with FTS5 as the retrieval backbone** — echoes [Zep](https://github.com/getzep/zep) and [mem0](https://github.com/mem0ai/mem0), minus the graph / vector store.
+
+## Releasing
+
+Maintainers run `bun run release <version>` from an up-to-date `main`.
+The command synchronizes all three version manifests, writes release notes,
+verifies, commits and pushes main. GitHub Actions reuses the four-way verification
+matrix, checks the manifest versions, then creates the version tag and publishes
+the release using `GITHUB_TOKEN`. No personal token or local `gh` login is needed.
+Rerunning preserves an existing release; an unpublished tag pointing to a different
+commit is rejected. Use `--no-push` to prepare locally, or `--notes-file=<path>`
+for custom release notes. The Actions page also supports a manual rerun on main.

@@ -1,0 +1,75 @@
+name: release
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - package.json
+      - .claude-plugin/plugin.json
+      - .claude-plugin/marketplace.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/verify.yml
+
+  publish:
+    needs: verify
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish verified release
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { readFileSync, existsSync } = require('node:fs');
+            const read = path => JSON.parse(readFileSync(path, 'utf8'));
+            const version = read('package.json').version;
+            const tag = `v${version}`;
+            if (!/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(version) ||
+                read('.claude-plugin/plugin.json').version !== version ||
+                read('.claude-plugin/marketplace.json').plugins[0].version !== version) {
+              throw new Error('Release tag and manifest versions must match');
+            }
+            try {
+              await github.rest.repos.getReleaseByTag({ ...context.repo, tag });
+              core.info(`Release ${tag} already exists; preserving it.`);
+              return;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            // GitHub ignores target_commitish when a tag already exists.
+            // Refuse to publish an old tag against a newly verified commit.
+            try {
+              let { data: { object } } = await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` });
+              while (object.type === 'tag') {
+                ({ data: { object } } = await github.rest.git.getTag({ ...context.repo, tag_sha: object.sha }));
+              }
+              if (object.type !== 'commit' || object.sha !== context.sha) {
+                throw new Error(`Existing tag ${tag} points to a different commit`);
+              }
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            const notesPath = `docs/releases/${tag}.md`;
+            const { data } = await github.rest.repos.createRelease({
+              ...context.repo,
+              tag_name: tag,
+              target_commitish: context.sha,
+              name: tag,
+              body: existsSync(notesPath) ? readFileSync(notesPath, 'utf8') : undefined,
+              generate_release_notes: true,
+              draft: false,
+              prerelease: version.includes('-'),
+            });
+            core.info(`Published ${data.html_url}`);

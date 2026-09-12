@@ -157,3 +157,13 @@ MIT —— 见 [LICENSE](LICENSE)。
 ### 主动记忆与新版 Claude
 
 每个 turn 先用 FTS5 检索相关旧消息，再注入近期上下文，检索范围限定在当前会话及有归属的事实。支持中文片段回退、检索数量和摘要长度预算。桥接会话各自使用 Claude 原生自动记忆目录，恢复会话时刷新系统提示。`memoryScope: none` 关闭自动记忆注入，但仍持久化成功的会话记录。项目文件、hooks、MCP 与 skills 仍属于受信任的共享工作区；这不是多租户沙箱。
+
+## 发布新版本
+
+维护者在同步后的 `main` 上执行 `bun run release <version>`。
+命令会同步三个版本清单、写入发布说明、运行验证、提交并推送 main。
+GitHub Actions 会复用四组验证，确认版本一致后，用 `GITHUB_TOKEN`
+自动创建版本标签与 Release，无需个人 token 或本地 `gh` 登录。
+重跑会保留已存在的 Release；尚未发布但指向其他提交的同名标签会被拒绝。
+`--no-push` 可只在本地准备，`--notes-file=<path>` 可指定发布说明；
+也可在 Actions 页面选择 main 手动运行发布流程。

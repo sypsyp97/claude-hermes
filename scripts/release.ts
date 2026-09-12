@@ -1,19 +1,19 @@
 #!/usr/bin/env bun
 /**
  * Cut a new release. Bumps the version across all three manifests,
- * runs `bun run verify`, commits, tags, pushes, and drafts a GitHub
- * release. Abort + revert the bump if verify fails.
+ * runs `bun run verify`, commits and pushes main. GitHub Actions verifies
+ * all four platforms before creating the version tag and GitHub release. Abort + revert the bump if verify fails.
  *
  *   bun run release 1.0.1
  *   bun run release 1.0.1 --dry-run          # preview only
- *   bun run release 1.0.1 --no-push           # tag locally, don't push
- *   bun run release 1.0.1 --no-release        # push tag, skip `gh release create`
+ *   bun run release 1.0.1 --no-push           # commit locally, don't push
+ *   bun run release 1.0.1 --no-release        # legacy alias; publication now belongs to CI
  *   bun run release 1.0.1 --notes-file=X.md   # override auto-generated notes
  */
 
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 const SEMVER = /^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
 const ROOT = process.cwd();
@@ -88,6 +88,7 @@ async function main(): Promise<void> {
 
   const dryRun = flag("--dry-run", args) === true;
   const noPush = flag("--no-push", args) === true;
+  // Retain the old flag for callers that already skipped local gh publication.
   const noRelease = flag("--no-release", args) === true;
   const notesFile = flag("--notes-file", args);
 
@@ -128,14 +129,15 @@ async function main(): Promise<void> {
     notes = `## Changes\n\n${log || "- (no commits since v" + current + ")"}\n`;
   }
 
+  const notesPath = join(ROOT, "docs", "releases", `v${version}.md`);
+  const previousNotes = existsSync(notesPath) ? readFileSync(notesPath, "utf-8") : null;
+
   if (dryRun) {
     console.log("[release] --dry-run: would write:");
     for (const f of files) console.log(`  ${f.path} (${f.selector}: ${f.current} → ${version})`);
-    console.log(`[release] --dry-run: would commit "Release v${version}", tag v${version}`);
-    console.log(`[release] --dry-run: would push main + tag${noPush ? " (skipped)" : ""}`);
-    console.log(
-      `[release] --dry-run: would create release${noRelease ? " (skipped)" : ""} with notes:\n---\n${notes}---`
-    );
+    console.log(`[release] --dry-run: would commit "Release v${version}" and ${notesPath}`);
+    console.log(`[release] --dry-run: would push main${noPush ? " (skipped)" : ""}`);
+    console.log(`[release] --dry-run: CI would verify and publish the release with notes:\n---\n${notes}---`);
     return;
   }
 
@@ -145,34 +147,30 @@ async function main(): Promise<void> {
     writeFileSync(f.path, JSON.stringify(f.json, null, 2) + "\n");
   }
 
+  mkdirSync(dirname(notesPath), { recursive: true });
+  writeFileSync(notesPath, notes);
+
   // Verify — if it fails, restore the untracked bump so the tree stays clean.
   console.log("[release] running bun run verify");
   const verify = spawnSync("bun", ["run", "verify"], { stdio: "inherit" });
   if (verify.status !== 0) {
     sh("git", ["restore", ...files.map((f) => f.path)]);
-    die("verify failed — version bump reverted");
+    if (previousNotes === null) rmSync(notesPath);
+    else writeFileSync(notesPath, previousNotes);
+    die("verify failed — version bump and notes reverted");
   }
 
-  // Commit + tag
-  sh("git", ["add", ...files.map((f) => f.path)]);
+  sh("git", ["add", ...files.map((f) => f.path), notesPath]);
   sh("git", ["commit", "-m", `Release v${version}`]);
-  sh("git", ["tag", "-a", `v${version}`, "-m", `v${version}`]);
 
   if (noPush) {
-    console.log(`[release] committed and tagged locally; skipped push (tag: v${version})`);
+    console.log(`[release] committed locally; push main when ready to publish v${version}`);
     return;
   }
 
   sh("git", ["push", "origin", "main"]);
-  sh("git", ["push", "origin", `v${version}`]);
-
-  if (noRelease) {
-    console.log(`[release] pushed main + v${version}; skipped GitHub release`);
-    return;
-  }
-
-  sh("gh", ["release", "create", `v${version}`, "--title", `v${version}`, "--notes", notes]);
-  console.log(`[release] done — v${version} published`);
+  if (noRelease) console.log("[release] --no-release: local gh publication is now always skipped");
+  console.log(`[release] pushed main; GitHub Actions will verify and publish v${version}`);
 }
 
 void main();
