@@ -65,6 +65,83 @@ function target(userId = 1) {
   return telegramSessionTarget({ workspace: cwd, chatId: userId, userId, isDm: true });
 }
 
+test("recall uses human text before clock, bridge and skill context consume query terms", async () => {
+  const mine = target();
+  await sessionAccess(mine).create("existing");
+  const db = await getSharedDb();
+  const sessionId = getByKey(db, mine.key)!.id;
+  appendMessage(db, { sessionId, role: "user", content: "Orion uses port 8123", ts: "2020" });
+  for (let i = 0; i < 8; i++) appendMessage(db, { sessionId, role: "user", content: `lunch ${i}` });
+  const text = "Could you kindly help me recall exactly which configuration we previously chose for Orion?";
+  process.env.HERMES_FAKE_ECHO_APPEND_SYSTEM_PROMPT = "1";
+  const result = await runUserMessage(
+    "telegram",
+    { text, context: `[Telegram from Alice]\nMessage: ${text}` },
+    mine,
+    undefined,
+    "telegram"
+  );
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("8123");
+});
+
+test.each(["message", "skill"] as const)(
+  "autoThread %s cannot recreate a thread deleted before its creation response",
+  async (kind) => {
+    const db = await getSharedDb();
+    upsertPolicy(
+      db,
+      { source: "discord", guild: "g", channel: "parent" },
+      { mode: "listen", autoThread: true }
+    );
+    await mkdir(join(cwd, ".claude/skills/report"), { recursive: true });
+    await writeFile(
+      join(cwd, ".claude/skills/report/SKILL.md"),
+      "---\nname: report\ndescription: Report\n---\nWrite a report."
+    );
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      if (String(url).endsWith("/threads")) {
+        handleDispatch("fake", "THREAD_CREATE", {
+          id: "deleted-auto",
+          parent_id: "parent",
+          type: 11,
+          guild_id: "g",
+        });
+        handleDispatch("fake", "THREAD_DELETE", { id: "deleted-auto" });
+        await enqueueBridge("discord", "deleted-auto", async () => {});
+        return Response.json({ id: "deleted-auto", name: "work" });
+      }
+      if (init?.method === "GET") return Response.json({ name: "work", type: 0 });
+      return Response.json({ id: "sent" });
+    }) as typeof fetch;
+    const author = { id: "a", username: "Alice", discriminator: "0" };
+    if (kind === "message")
+      await handleMessageCreate("fake", {
+        id: "m",
+        channel_id: "parent",
+        guild_id: "g",
+        author,
+        content: "remember that Orion uses port 8123",
+        attachments: [],
+        mentions: [],
+        type: 0,
+      });
+    else
+      await handleInteractionCreate("fake", {
+        id: "i",
+        type: 2,
+        application_id: "app",
+        token: "fake",
+        channel_id: "parent",
+        guild_id: "g",
+        member: { user: author },
+        data: { name: "report" },
+      });
+    expect(getByKey(db, "thread:discord:deleted-auto")).toBeNull();
+    expect(db.query("SELECT * FROM memory_entries").all()).toEqual([]);
+  }
+);
+
 test("deleting a shared thread waits for its first admitted turn before removing it", async () => {
   const target = discordSessionTarget(
     { workspace: cwd, channelId: "new-thread", guildId: "g", userId: "a", isThread: true },

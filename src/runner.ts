@@ -714,7 +714,7 @@ async function execClaude(
     }
     try {
       const db = await getSharedDb(process.cwd());
-      runtimeDigest = buildRuntimeMemoryDigest(db, { query: prompt, target: session.scoped ? session.target : undefined });
+      runtimeDigest = buildRuntimeMemoryDigest(db, { query: userText ?? prompt, target: session.scoped ? session.target : undefined });
     } catch {
       // DB digest failures are also non-fatal; file-backed memory still loads.
     }

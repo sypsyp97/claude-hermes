@@ -97,6 +97,8 @@ let readyGuildIds: Set<string> | null = null;
 
 // Track known thread channel IDs and their parent channel IDs for multi-session support
 const channels = new Map<string, { name?: string; type?: number; parent_id?: string; guild_id?: string }>();
+// Tombstones exist only while a thread creation/first reply is in flight.
+const pendingThreadCreations = new Set<Set<string>>();
 const knownThreads = new Map<string, { parentId: string }>();
 
 // --- Debug ---
@@ -241,16 +243,33 @@ async function resolveConversation(channelId: string, userId: string, guildId?: 
   return { policy, isThread, target: discordSessionTarget({ workspace: process.cwd(), channelId, userId, guildId, isThread }, policy) };
 }
 
-async function createAutoThread(token: string, channelId: string, userId: string, guildId: string, label: string, messageId?: string) {
-  const endpoint = messageId ? `/channels/${channelId}/messages/${messageId}/threads` : `/channels/${channelId}/threads`;
-  const thread = await discordApi<{id:string;name?:string}>(token,"POST",endpoint, {
-    name: label.trim().slice(0,100) || "Conversation", auto_archive_duration:1440,
-    ...(messageId ? {} : {type:11}),
-  });
-  knownThreads.set(thread.id,{parentId:channelId});
-  channels.set(thread.id,{...thread,type:11,parent_id:channelId,guild_id:guildId});
-  // Resolve exactly as the next incoming message will, including explicit sharing.
-  return resolveConversation(thread.id,userId,guildId);
+async function withAutoThread(
+  token: string, channelId: string, userId: string, guildId: string, label: string,
+  work: (conversation: Awaited<ReturnType<typeof resolveConversation>>) => Promise<void>,
+  messageId?: string,
+): Promise<void> {
+  const deleted = new Set<string>();
+  pendingThreadCreations.add(deleted);
+  try {
+    const endpoint = messageId ? `/channels/${channelId}/messages/${messageId}/threads` : `/channels/${channelId}/threads`;
+    const thread = await discordApi<{id:string;name?:string}>(token, "POST", endpoint, {
+      name: label.trim().slice(0,100) || "Conversation", auto_archive_duration:1440,
+      ...(messageId ? {} : {type:11}),
+    });
+    const assertPresent = () => {
+      if (deleted.has(thread.id)) throw new Error("Thread was deleted before its first request could run.");
+    };
+    assertPresent();
+    knownThreads.set(thread.id,{parentId:channelId});
+    channels.set(thread.id,{...thread,type:11,parent_id:channelId,guild_id:guildId});
+    await enqueueBridge("discord", thread.id, async () => {
+      const conversation = await resolveConversation(thread.id,userId,guildId);
+      assertPresent();
+      await work(conversation);
+    });
+  } finally {
+    pendingThreadCreations.delete(deleted);
+  }
 }
 
 // --- Guild trigger logic ---
@@ -506,71 +525,77 @@ async function processMessageCreate(token: string, message: DiscordMessage): Pro
       }
     }
 
-    if (message.guild_id && policy.autoThread && !isThread) {
-      const conversation = await createAutoThread(config.token, channelId, userId, message.guild_id, cleanContent || `${label}'s conversation`, message.id);
-      target = conversation.target;
-      channelId = target.channel!;
-    }
-
-    // Skill routing: detect slash commands and resolve to SKILL.md prompts
-    let skillContext: string | null = null;
-    if (command) {
-      try {
-        skillContext = await resolveSkillPrompt(command);
-        if (skillContext) {
-          debugLog(`Skill resolved for ${command}: ${skillContext.length} chars`);
+    const reply = async () => {
+      // Skill routing: detect slash commands and resolve to SKILL.md prompts
+      let skillContext: string | null = null;
+      if (command) {
+        try {
+          skillContext = await resolveSkillPrompt(command);
+          if (skillContext) {
+            debugLog(`Skill resolved for ${command}: ${skillContext.length} chars`);
+          }
+        } catch (err) {
+          debugLog(`Skill resolution failed for ${command}: ${err instanceof Error ? err.message : err}`);
         }
-      } catch (err) {
-        debugLog(`Skill resolution failed for ${command}: ${err instanceof Error ? err.message : err}`);
       }
-    }
 
-    // Build prompt (same pattern as Telegram)
-    const promptParts = [`[Discord from ${label}]`];
-    if (skillContext) {
-      const args = cleanContent.trim().slice(command!.length).trim();
-      promptParts.push(`<command-name>${command}</command-name>`);
-      promptParts.push(skillContext);
-      if (args) promptParts.push(`User arguments: ${args}`);
-    } else if (cleanContent.trim()) {
-      promptParts.push(`Message: ${cleanContent}`);
-    }
-    if (imagePath) {
-      promptParts.push(`Image path: ${imagePath}`);
-      promptParts.push("The user attached an image. Inspect this image file directly before answering.");
-    } else if (hasImage) {
-      promptParts.push("The user attached an image, but downloading it failed. Respond and ask them to resend.");
-    }
-    if (voiceTranscript) {
-      promptParts.push(`Voice transcript: ${voiceTranscript}`);
-      promptParts.push("The user attached voice audio. Use the transcript as their spoken message.");
-    } else if (hasVoice) {
-      promptParts.push(
-        "The user attached voice audio, but it could not be transcribed. Respond and ask them to resend a clearer clip.",
-      );
-    }
+      // Build prompt (same pattern as Telegram)
+      const promptParts = [`[Discord from ${label}]`];
+      if (skillContext) {
+        const args = cleanContent.trim().slice(command!.length).trim();
+        promptParts.push(`<command-name>${command}</command-name>`);
+        promptParts.push(skillContext);
+        if (args) promptParts.push(`User arguments: ${args}`);
+      } else if (cleanContent.trim()) {
+        promptParts.push(`Message: ${cleanContent}`);
+      }
+      if (imagePath) {
+        promptParts.push(`Image path: ${imagePath}`);
+        promptParts.push("The user attached an image. Inspect this image file directly before answering.");
+      } else if (hasImage) {
+        promptParts.push("The user attached an image, but downloading it failed. Respond and ask them to resend.");
+      }
+      if (voiceTranscript) {
+        promptParts.push(`Voice transcript: ${voiceTranscript}`);
+        promptParts.push("The user attached voice audio. Use the transcript as their spoken message.");
+      } else if (hasVoice) {
+        promptParts.push(
+          "The user attached voice audio, but it could not be transcribed. Respond and ask them to resend a clearer clip.",
+        );
+      }
 
-    const prefixedPrompt = promptParts.join("\n");
-    // Use thread-specific session if message is in a known thread
-    const threadId = target;
-    const statusSink = createDiscordStatusSink({
-      transport: discordStatusTransport(config.token),
-      channelId,
-    });
-    const result = await runUserMessage("discord", {text: cleanContent || voiceTranscript || "", context: prefixedPrompt}, threadId, statusSink, "discord");
+      const prefixedPrompt = promptParts.join("\n");
+      // Use thread-specific session if message is in a known thread
+      const threadId = target;
+      const statusSink = createDiscordStatusSink({
+        transport: discordStatusTransport(config.token),
+        channelId,
+      });
+      const result = await runUserMessage("discord", {text: cleanContent || voiceTranscript || "", context: prefixedPrompt}, threadId, statusSink, "discord");
 
-    if (result.exitCode !== 0) {
-      await sendMessage(config.token, channelId, `Error (exit ${result.exitCode}): ${result.stderr || result.stdout || "Unknown error"}`);
+      if (result.exitCode !== 0) {
+        await sendMessage(config.token, channelId, `Error (exit ${result.exitCode}): ${result.stderr || result.stdout || "Unknown error"}`);
+      } else {
+        const visibleText = extractSessionAndResultFromText(result.stdout || "").result ?? result.stdout ?? "";
+        const { cleanedText, reactionEmoji } = extractReactionDirective(visibleText);
+        if (reactionEmoji) {
+          await sendReaction(config.token, message.channel_id, message.id, reactionEmoji).catch((err) => {
+            console.error(`[Discord] Failed to send reaction for ${label}: ${err instanceof Error ? err.message : err}`);
+          });
+        }
+        await sendMessage(config.token, channelId, cleanedText || "(empty response)");
+      }
+    };
+    if (message.guild_id && policy.autoThread && !isThread) {
+      await withAutoThread(config.token, channelId, userId, message.guild_id, cleanContent || `${label}'s conversation`, async conversation => {
+        target = conversation.target;
+        channelId = target.channel!;
+        await reply();
+      }, message.id);
     } else {
-      const visibleText = extractSessionAndResultFromText(result.stdout || "").result ?? result.stdout ?? "";
-      const { cleanedText, reactionEmoji } = extractReactionDirective(visibleText);
-      if (reactionEmoji) {
-        await sendReaction(config.token, message.channel_id, message.id, reactionEmoji).catch((err) => {
-          console.error(`[Discord] Failed to send reaction for ${label}: ${err instanceof Error ? err.message : err}`);
-        });
-      }
-      await sendMessage(config.token, channelId, cleanedText || "(empty response)");
+      await reply();
     }
+
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error(`[Discord] Error for ${label}: ${errMsg}`);
@@ -746,47 +771,52 @@ async function processInteractionCreate(token: string, interaction: DiscordInter
         let channelId = interaction.channel_id;
         let threadId = target;
         let createdThread = false;
-        if (interaction.guild_id && policy.autoThread && !isThread) {
-          const conversation = await createAutoThread(config.token, channelId, actorId, interaction.guild_id, commandName);
-          threadId = conversation.target;
-          channelId = threadId.channel!;
-          createdThread = true;
-        }
+        const reply = async () => {
+          const promptParts = [
+            `[Discord slash command /${commandName}]`,
+            `<command-name>${commandName}</command-name>`,
+            skillContext,
+          ];
+          const prefixedPrompt = promptParts.join("\n");
 
-        const promptParts = [
-          `[Discord slash command /${commandName}]`,
-          `<command-name>${commandName}</command-name>`,
-          skillContext,
-        ];
-        const prefixedPrompt = promptParts.join("\n");
+          const statusSink = channelId
+            ? createDiscordStatusSink({
+                transport: discordStatusTransport(config.token),
+                channelId,
+              })
+            : undefined;
 
-        const statusSink = channelId
-          ? createDiscordStatusSink({
-              transport: discordStatusTransport(config.token),
-              channelId,
-            })
-          : undefined;
-
-        const result = await runUserMessage(
-          "discord-slash",
-          prefixedPrompt,
-          threadId,
-          statusSink,
-          "discord",
-        );
-
-        const body =
-          result.exitCode === 0
-            ? extractReactionDirective(result.stdout || "").cleanedText ||
-              "(empty response)"
-            : `Error (exit ${result.exitCode}): ${result.stderr || result.stdout || "Unknown error"}`;
-
-        if (createdThread) await sendMessage(config.token, channelId, body);
-        await respondToInteraction(interaction, { content: createdThread ? `Result posted in <#${channelId}>.` : body.slice(0, 2000) }).catch((err) => {
-          console.error(
-            `[Discord] Failed to patch slash-command response: ${err}`,
+          const result = await runUserMessage(
+            "discord-slash",
+            { text: `/${commandName}`, context: prefixedPrompt },
+            threadId,
+            statusSink,
+            "discord",
           );
-        });
+
+          const body =
+            result.exitCode === 0
+              ? extractReactionDirective(result.stdout || "").cleanedText ||
+                "(empty response)"
+              : `Error (exit ${result.exitCode}): ${result.stderr || result.stdout || "Unknown error"}`;
+
+          if (createdThread) await sendMessage(config.token, channelId, body);
+          await respondToInteraction(interaction, { content: createdThread ? `Result posted in <#${channelId}>.` : body.slice(0, 2000) }).catch((err) => {
+            console.error(
+              `[Discord] Failed to patch slash-command response: ${err}`,
+            );
+          });
+        };
+        if (interaction.guild_id && policy.autoThread && !isThread) {
+          await withAutoThread(config.token, channelId, actorId, interaction.guild_id, commandName, async conversation => {
+            threadId = conversation.target;
+            channelId = threadId.channel!;
+            createdThread = true;
+            await reply();
+          });
+        } else {
+          await reply();
+        }
         return;
       }
     } catch (err) {
@@ -912,6 +942,7 @@ export function handleDispatch(token: string, eventName: string, data: any): voi
       break;
 
     case "THREAD_DELETE":
+      if (data.id) for (const deleted of pendingThreadCreations) deleted.add(data.id);
       if (data.id) channels.delete(data.id);
       if (data.id) {
         knownThreads.delete(data.id);

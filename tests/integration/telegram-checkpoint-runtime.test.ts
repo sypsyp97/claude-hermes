@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { poll, handleMyChatMember } from "../../src/commands/telegram";
+import { poll, handleMyChatMember, stopPolling } from "../../src/commands/telegram";
 import { telegramCheckpoint } from "../../src/adapters/telegram/checkpoint";
 import { getSharedDb, resetSharedDbCache } from "../../src/state/shared-db";
 import { upsertPolicy } from "../../src/state/repos/policies";
@@ -25,6 +25,7 @@ beforeEach(async () => {
   await reloadSettings();
 });
 afterEach(async () => {
+  stopPolling();
   globalThis.fetch = originalFetch;
   if (originalBin === undefined) delete process.env.HERMES_CLAUDE_BIN;
   else process.env.HERMES_CLAUDE_BIN = originalBin;
