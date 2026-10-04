@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +18,9 @@ let paths: typeof import("./paths");
 
 beforeAll(async () => {
   await mkdir(TEMP_ROOT, { recursive: true });
+  // An invalid .git file keeps outside-repository tests independent of
+  // whether the system temporary directory is itself inside a repository.
+  await writeFile(join(TEMP_ROOT, ".git"), "not a gitfile\n");
   process.chdir(TEMP_ROOT);
   onboarding = await import("./onboarding");
   paths = await import("./paths");
@@ -71,6 +75,10 @@ function whichAll(): (binary: string) => Promise<string | null> {
 function whichMissing(missing: string[]): (binary: string) => Promise<string | null> {
   const missingSet = new Set(missing);
   return async (binary: string) => (missingSet.has(binary) ? null : `/usr/local/bin/${binary}`);
+}
+
+function initGitRepo(cwd: string, args: string[] = []): void {
+  execFileSync("git", ["init", "--quiet", ...args, cwd], { stdio: "pipe" });
 }
 
 // ---------------------------------------------------------------------------
@@ -158,8 +166,7 @@ describe("runPreflightChecks", () => {
     await mkdir(cwd, { recursive: true });
     const home = join(TEMP_ROOT, "preflight-healthy-home");
     await mkdir(home, { recursive: true });
-    // Give the cwd a .git so insideGitRepo is true.
-    await mkdir(join(cwd, ".git"), { recursive: true });
+    initGitRepo(cwd);
 
     const report = await onboarding.runPreflightChecks({
       cwd,
@@ -178,7 +185,7 @@ describe("runPreflightChecks", () => {
   test("missing claude CLI populates problems and flag is false", async () => {
     const cwd = join(TEMP_ROOT, "preflight-no-claude");
     await mkdir(cwd, { recursive: true });
-    await mkdir(join(cwd, ".git"), { recursive: true });
+    initGitRepo(cwd);
     const home = join(TEMP_ROOT, "preflight-no-claude-home");
     await mkdir(home, { recursive: true });
 
@@ -197,7 +204,7 @@ describe("runPreflightChecks", () => {
   test("missing node populates problems and flag is false", async () => {
     const cwd = join(TEMP_ROOT, "preflight-no-node");
     await mkdir(cwd, { recursive: true });
-    await mkdir(join(cwd, ".git"), { recursive: true });
+    initGitRepo(cwd);
     const home = join(TEMP_ROOT, "preflight-no-node-home");
     await mkdir(home, { recursive: true });
 
@@ -239,6 +246,74 @@ describe("runPreflightChecks", () => {
 
     expect(report.insideGitRepo).toBe(false);
     expect(report.problems.some((p) => p.toLowerCase().includes("git"))).toBe(true);
+  });
+
+  test("nested cwd inside a real repository sets insideGitRepo true", async () => {
+    const repo = join(TEMP_ROOT, "preflight-parent-repo");
+    initGitRepo(repo);
+    const cwd = join(repo, "nested", "project");
+    await mkdir(cwd, { recursive: true });
+
+    const report = await onboarding.runPreflightChecks({ cwd, which: whichAll() });
+
+    expect(report.insideGitRepo).toBe(true);
+  });
+
+  test("empty .git directory is not a repository", async () => {
+    const cwd = join(TEMP_ROOT, "preflight-empty-git");
+    await mkdir(join(cwd, ".git"), { recursive: true });
+
+    const report = await onboarding.runPreflightChecks({ cwd, which: whichAll() });
+
+    expect(report.insideGitRepo).toBe(false);
+    expect(report.problems.some((p) => p.toLowerCase().includes("git"))).toBe(true);
+  });
+
+  test("malformed .git file is not a repository", async () => {
+    const cwd = join(TEMP_ROOT, "preflight-malformed-gitfile");
+    await mkdir(cwd, { recursive: true });
+    await writeFile(join(cwd, ".git"), "not a gitfile\n");
+
+    const report = await onboarding.runPreflightChecks({ cwd, which: whichAll() });
+
+    expect(report.insideGitRepo).toBe(false);
+  });
+
+  test("valid .git file pointing to a separate git directory is supported", async () => {
+    const cwd = join(TEMP_ROOT, "preflight-gitfile");
+    initGitRepo(cwd, ["--separate-git-dir", join(TEMP_ROOT, "preflight-gitfile-metadata")]);
+    expect((await stat(join(cwd, ".git"))).isFile()).toBe(true);
+
+    const report = await onboarding.runPreflightChecks({ cwd, which: whichAll() });
+
+    expect(report.insideGitRepo).toBe(true);
+  });
+
+  test("bare repository is not a working tree", async () => {
+    const cwd = join(TEMP_ROOT, "preflight-bare-repo");
+    initGitRepo(cwd, ["--bare"]);
+
+    const report = await onboarding.runPreflightChecks({ cwd, which: whichAll() });
+
+    expect(report.insideGitRepo).toBe(false);
+  });
+
+  test("missing git executable reports false without rejecting", async () => {
+    const cwd = join(TEMP_ROOT, "preflight-no-git-executable");
+    initGitRepo(cwd);
+    const emptyBinDir = join(TEMP_ROOT, "empty-bin");
+    await mkdir(emptyBinDir);
+    const originalPath = process.env.PATH;
+    process.env.PATH = emptyBinDir;
+    try {
+      const report = await onboarding.runPreflightChecks({ cwd, which: whichAll() });
+
+      expect(report.insideGitRepo).toBe(false);
+      expect(report.problems.some((p) => p.toLowerCase().includes("git"))).toBe(true);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
   });
 
   test("hermesDirWritable is true when hermes dir can be created under cwd", async () => {

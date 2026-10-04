@@ -137,6 +137,12 @@ typecheck → lint → unit → smoke → integration
 
 ## 开发
 
+`bun run verify:formal` 单独运行有界运行时状态模型、故意注入缺陷的反例检查，
+并在真实实现上重放关键轨迹（需要 Python 3.10+）。它穷举文档限定的有限状态空间，
+不代表整个程序已被证明正确。详见[形式化验证说明](formal/README.md)和
+[2026-10-04 兼容性审查](docs/FORMAL_COMPATIBILITY_REVIEW.md)，其中记录了当前
+Claude Code 对插件名称校验的兼容性阻塞。
+
 ```bash
 bun run typecheck   # tsc --noEmit
 bun run lint        # biome check src tests scripts

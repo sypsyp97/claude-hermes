@@ -405,15 +405,46 @@ export function buildSecurityArgs(security: SecurityConfig): string[] {
   return args;
 }
 
+// Documented operator controls, audited against Claude Code 2.1.289:
+// https://code.claude.com/docs/en/env-vars#variables
+// Keep an explicit set: session/IPC fields and flags that override Hermes's
+// memory isolation or no-replay policy must not cross this boundary.
+const CLAUDE_OPERATOR_ENV = new Set([
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+  "CLAUDE_CODE_USE_MANTLE",
+  "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+  "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+  "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+  "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+  "CLAUDE_CODE_SKIP_MANTLE_AUTH",
+  "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_MCP_ALLOWLIST_ENV",
+  "CLAUDE_CODE_MCP_STARTUP_WAIT_MS",
+  "CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES",
+  "CLAUDE_CODE_DISABLE_WEB_FETCH",
+  "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
+  "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+  "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+  "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+  "CLAUDE_CODE_MAX_TURNS",
+  "CLAUDE_CODE_MAX_RETRIES",
+  "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY",
+  "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS",
+  "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH",
+]);
+
 /**
  * Strip the parent Claude Code signalling vars from an env before handing
  * it to a spawned `claude` subprocess.
  *
  * Removes:
  *  - `CLAUDECODE` — the legacy "you are nested under Claude Code" flag.
- *  - `CLAUDE_CODE_*` (all) — entrypoint / exec path / any future IPC var.
- *    Prefix-stripping guards against new vars that a later Claude Code
- *    release might start setting.
+ *  - Unknown `CLAUDE_CODE_*` — entrypoint / exec path / future IPC vars.
+ *    Explicitly documented provider, headless and resource-limit controls
+ *    survive; new namespace fields default to removal until classified.
  *
  * Preserves everything else, including unrelated `CLAUDE_*` vars (e.g.
  * provider credentials) and `ANTHROPIC_*` tokens — stripping those would
@@ -424,7 +455,7 @@ export function cleanChildEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   for (const [k, v] of Object.entries(env)) {
     if (v === undefined) continue;
     if (k === "CLAUDECODE") continue;
-    if (k.startsWith("CLAUDE_CODE_")) continue;
+    if (k.startsWith("CLAUDE_CODE_") && !CLAUDE_OPERATOR_ENV.has(k)) continue;
     out[k] = v;
   }
   // Mark this child so `--stop-all` / `--stop` run from inside it can skip

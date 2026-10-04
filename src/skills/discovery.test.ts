@@ -151,6 +151,32 @@ describe("discoverSkills", () => {
   });
 });
 
+describe("discoverSkills configuration roots", () => {
+  test("uses injected global and plugin roots while project skills retain precedence", async () => {
+    const configDir = join(tempRoot, "custom-config");
+    await writeSkill(projectSkillsDir, "shared", "Project wins");
+    await writeSkill(globalSkillsDir, "wrong-home", "Unrelated home skill");
+    await writeSkill(join(configDir, "skills"), "shared", "Custom global shadowed");
+    await writeSkill(join(configDir, "skills"), "custom-global", "Custom global");
+    await writeSkill(
+      join(configDir, "plugins", "cache", "market", "plugin", "v1", "skills"),
+      "cached",
+      "Custom plugin"
+    );
+    const skills = await discoverSkills({
+      cwd: fakeCwd,
+      home: fakeHome,
+      env: { CLAUDE_CONFIG_DIR: configDir },
+    });
+    expect(skills.map((skill) => skill.name).sort()).toEqual(["custom-global", "market_cached", "shared"]);
+    expect(skills.find((skill) => skill.name === "shared")?.source).toBe("project");
+    expect(skills.find((skill) => skill.name === "custom-global")?.path).toBe(
+      join(configDir, "skills", "custom-global", "SKILL.md")
+    );
+    expect(skills.find((skill) => skill.name === "market_cached")?.source).toBe("plugin");
+  });
+});
+
 describe("extractDescription", () => {
   test("returns default when content has no usable text", () => {
     expect(extractDescription("# Only heading\n---")).toBe("Claude Code skill");

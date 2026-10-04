@@ -35,7 +35,12 @@ export function prepareBridgeTransfer<T>(source: string, work: (value: T) => Pro
     const admit = () =>
       enqueueBridge(source, channel, async () => {
         const destination = await ready;
-        if (destination?.channel === channel) await work(destination.value);
+        if (destination?.channel === channel) {
+          // Creation may finish after this bridge lifecycle was cancelled.
+          // Admission's abort check occurred before waiting for that response.
+          signal?.throwIfAborted();
+          await work(destination.value);
+        }
       });
     const task = signal ? withBridgeSignal(signal, admit) : admit();
     void task.catch(() => {}); // The selected destination is observed by complete().

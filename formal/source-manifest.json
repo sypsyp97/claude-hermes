@@ -1,0 +1,30 @@
+{
+  "reference_commit": "e0fbf5a77c29ac4008b899df6d8b9293a3f722ee",
+  "sources": [
+    {
+      "path": "src/runtime/execution-budget.ts",
+      "sha256": "f27379b70194fa3d1645f953afecb6d09c2b950110b3c922863b4a9b6d6c0c12"
+    },
+    {
+      "path": "src/runtime/bridge-queue.ts",
+      "sha256": "bc0b191b41806b55f3f2e5ddcea288322c4635b05203229eb7c292e0b1575c8b"
+    },
+    {
+      "path": "src/runtime/conversation-controls.ts",
+      "sha256": "ec2ad9340bcf0ab0ec484201e7bba18f5077d69c7983abc43c7ba43a65f2bf5e"
+    },
+    {
+      "path": "src/runtime/bridge-context.ts",
+      "sha256": "050c1e12ad98e1831d933206708d48066159b1896de9629fb440854744cc77d8"
+    },
+    {
+      "path": "src/runner.ts",
+      "start": "function enqueue<T>",
+      "end": "/** Test-only: number of thread queue slots currently held. */",
+      "sha256": "b25aac0554100dcd050f5f3f91591a8bfc0e13e9f2239e0b7965d9a4569cb93d"
+    }
+  ],
+  "reviewed_changes": [
+    "src/runtime/bridge-queue.ts: recheck the captured lifecycle signal after ready resolves, before selected destination work; local correction after reference revision."
+  ]
+}

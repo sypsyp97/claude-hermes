@@ -11,6 +11,7 @@ import { existsSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { claudeConfigDir, type ClaudeConfigEnv } from "../runtime/claude-paths";
 
 export type SkillSource = "project" | "global" | "plugin";
 
@@ -25,14 +26,17 @@ export interface SkillInfo {
 export interface DiscoveryRoots {
   cwd?: string;
   home?: string;
+  // Explicit homes stay isolated unless env is also supplied. Runtime uses process.env.
+  env?: ClaudeConfigEnv;
 }
 
 export async function discoverSkills(roots: DiscoveryRoots = {}): Promise<SkillInfo[]> {
   const cwd = roots.cwd ?? process.cwd();
   const home = roots.home ?? homedir();
+  const configDir = claudeConfigDir(home, roots.env ?? (roots.home === undefined ? process.env : {}));
   const projectSkillsDir = join(cwd, ".claude", "skills");
-  const globalSkillsDir = join(home, ".claude", "skills");
-  const pluginsDir = join(home, ".claude", "plugins");
+  const globalSkillsDir = join(configDir, "skills");
+  const pluginsDir = join(configDir, "plugins");
 
   const seen = new Set<string>();
   const skills: SkillInfo[] = [];

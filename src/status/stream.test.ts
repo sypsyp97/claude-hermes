@@ -160,6 +160,31 @@ describe("createStreamParser — envelope translation", () => {
 });
 
 describe("createStreamParser — NDJSON boundary handling", () => {
+  test("nested arrays are not envelopes and cannot recurse through the translator", () => {
+    const parser = createStreamParser();
+    const nested = "[".repeat(20_000) + "{}" + "]".repeat(20_000);
+    expect(parser.push(nested + "\n")).toEqual([]);
+    expect(parser.push(ndjson({ type: "result", subtype: "success", result: "ok" }))).toEqual([
+      { kind: "task_complete", result: "ok" },
+    ]);
+  });
+
+  test("JSON-array adapters retain ordered events and result errors", () => {
+    const parser = createStreamParser();
+    const events = parser.push(
+      JSON.stringify([
+        { type: "system", subtype: "init", session_id: "array-session" },
+        { type: "assistant", message: { content: [{ type: "text", text: "working" }] } },
+        { type: "result", subtype: "error_max_turns", errors: ["turn limit"] },
+      ]) + "\n"
+    );
+    expect(events).toEqual([
+      { kind: "task_start", sessionId: "array-session", model: undefined },
+      { kind: "text_delta", text: "working" },
+      { kind: "error", message: "turn limit" },
+    ]);
+  });
+
   test("multiple lines in one chunk emit events in order", () => {
     const p = createStreamParser();
     const events = p.push(
@@ -321,4 +346,74 @@ test("Claude result errors are failures for all current error subtypes", () => {
     );
     expect(events).toEqual([{ kind: "error", message: "budget exhausted" }]);
   }
+});
+
+test("singleton assistant blocks use the API block index after thinking and tool blocks", () => {
+  const parser = createStreamParser();
+  const events = parser.push(
+    ndjson(
+      { type: "stream_event", event: { type: "message_start", message: { id: "m-blocks" } } },
+      {
+        type: "stream_event",
+        event: { type: "content_block_start", index: 0, content_block: { type: "thinking" } },
+      },
+      { type: "stream_event", event: { type: "content_block_stop", index: 0 } },
+      {
+        type: "stream_event",
+        event: { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+      },
+      {
+        type: "stream_event",
+        event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Hello" } },
+      },
+      { type: "assistant", message: { id: "m-blocks", content: [{ type: "text", text: "Hello" }] } },
+      { type: "stream_event", event: { type: "content_block_stop", index: 1 } }
+    )
+  );
+  expect(events.filter((event) => event.kind === "text_delta")).toEqual([
+    { kind: "text_delta", text: "Hello" },
+  ]);
+});
+
+test("a second complete text block is not suppressed by a streamed first block", () => {
+  const parser = createStreamParser();
+  const events = parser.push(
+    ndjson(
+      { type: "stream_event", event: { type: "message_start", message: { id: "m-two" } } },
+      {
+        type: "stream_event",
+        event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "First" } },
+      },
+      { type: "assistant", message: { id: "m-two", content: [{ type: "text", text: "First" }] } },
+      { type: "stream_event", event: { type: "content_block_stop", index: 0 } },
+      {
+        type: "stream_event",
+        event: { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+      },
+      { type: "assistant", message: { id: "m-two", content: [{ type: "text", text: "Second" }] } },
+      { type: "stream_event", event: { type: "content_block_stop", index: 1 } }
+    )
+  );
+  expect(events.filter((event) => event.kind === "text_delta")).toEqual([
+    { kind: "text_delta", text: "First" },
+    { kind: "text_delta", text: "Second" },
+  ]);
+});
+
+test("the complete block recovers an unstreamed suffix without duplicating its prefix", () => {
+  const parser = createStreamParser();
+  const events = parser.push(
+    ndjson(
+      { type: "stream_event", event: { type: "message_start", message: { id: "m-suffix" } } },
+      {
+        type: "stream_event",
+        event: { type: "content_block_delta", index: 2, delta: { type: "text_delta", text: "Hello" } },
+      },
+      { type: "assistant", message: { id: "m-suffix", content: [{ type: "text", text: "Hello world" }] } }
+    )
+  );
+  expect(events.filter((event) => event.kind === "text_delta")).toEqual([
+    { kind: "text_delta", text: "Hello" },
+    { kind: "text_delta", text: " world" },
+  ]);
 });

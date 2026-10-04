@@ -18,6 +18,7 @@
     "test:integration": "bun test tests/integration",
     "verify": "bun run scripts/verify.ts",
     "verify:fast": "bun run scripts/verify.ts --fast",
+    "verify:formal": "python3 -B -m unittest discover -s formal -p 'test_*.py' && python3 formal/check.py --full --check-source --negative-controls && bun test formal",
     "release": "bun run scripts/release.ts"
   },
   "devDependencies": {

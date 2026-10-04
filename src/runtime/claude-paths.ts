@@ -2,11 +2,12 @@ import { join } from "node:path";
 import { readdir, stat } from "node:fs/promises";
 
 /**
- * Helpers for the `~/.claude/` project directory layout that Claude Code
+ * Helpers for the Claude configuration directory layout that Claude Code
  * itself maintains (separate from anything hermes writes).
  *
  * Claude Code stores per-project conversation transcripts under
- * `~/.claude/projects/<slug>/<sessionId>.jsonl`, where `<slug>` is the
+ * `<configDir>/projects/<slug>/<sessionId>.jsonl`, where `<configDir>` defaults
+ * to `~/.claude` and `<slug>` is the
  * project's working directory with every path separator and the Windows
  * drive `:` replaced by `-`. Examples:
  *
@@ -22,26 +23,49 @@ export function projectSlugFromCwd(cwd: string = process.cwd()): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, "-");
 }
 
-export function claudeProjectsDir(home: string): string {
-  return join(home, ".claude", "projects");
+export type ClaudeConfigEnv = Readonly<Record<string, string | undefined>>;
+
+/** Resolve at call time; an empty override keeps Claude's default home layout. */
+export function claudeConfigDir(home: string, env: ClaudeConfigEnv = process.env): string {
+  return env.CLAUDE_CONFIG_DIR || join(home, ".claude");
 }
 
-export function claudeProjectDir(home: string, cwd: string = process.cwd()): string {
-  return join(claudeProjectsDir(home), projectSlugFromCwd(cwd));
+// Explicit-home layout helpers are deterministic unless an environment is passed.
+// Legacy memory migration uses these too and must not move another account's files
+// merely because the surrounding process has CLAUDE_CONFIG_DIR set.
+export function claudeProjectsDir(home: string, env: ClaudeConfigEnv = {}): string {
+  return join(claudeConfigDir(home, env), "projects");
 }
 
-export function claudeProjectMemoryDir(home: string, cwd: string = process.cwd()): string {
-  return join(claudeProjectDir(home, cwd), "memory");
+export function claudeProjectDir(
+  home: string,
+  cwd: string = process.cwd(),
+  env: ClaudeConfigEnv = {}
+): string {
+  return join(claudeProjectsDir(home, env), projectSlugFromCwd(cwd));
+}
+
+export function claudeProjectMemoryDir(
+  home: string,
+  cwd: string = process.cwd(),
+  env: ClaudeConfigEnv = {}
+): string {
+  return join(claudeProjectDir(home, cwd, env), "memory");
 }
 
 /** Exact session identity is required before searching other project slugs. */
-export async function findSessionFile(home: string, cwd: string, sessionId: string): Promise<string | null> {
+export async function findSessionFile(
+  home: string,
+  cwd: string,
+  sessionId: string,
+  env: ClaudeConfigEnv = process.env
+): Promise<string | null> {
   if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) return null;
   const filename = `${sessionId}.jsonl`;
-  const direct = join(claudeProjectDir(home, cwd), filename);
+  const root = claudeProjectsDir(home, env);
+  const direct = join(root, projectSlugFromCwd(cwd), filename);
   if ((await stat(direct).catch(() => null))?.isFile()) return direct;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) return null;
-  const root = claudeProjectsDir(home);
   const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
   const candidates = await Promise.all(
     entries

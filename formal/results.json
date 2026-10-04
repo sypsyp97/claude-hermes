@@ -1,0 +1,290 @@
+{
+  "checker": "exhaustive-explicit-state",
+  "source_correspondence": {
+    "result": "PASS",
+    "reference_commit": "e0fbf5a77c29ac4008b899df6d8b9293a3f722ee",
+    "changed_files": []
+  },
+  "checks": [
+    {
+      "model": "budget-4-jobs-2-slots",
+      "result": "PASS",
+      "states": 2000,
+      "transitions": 7008,
+      "terminal_states": 16,
+      "max_shortest_path": 16,
+      "coverage": [
+        "abort-between-admission-and-continuation",
+        "abort-during-work",
+        "queued"
+      ],
+      "seconds": 0.048
+    },
+    {
+      "model": "budget-6-jobs-4-slots",
+      "result": "PASS",
+      "states": 193984,
+      "transitions": 1132224,
+      "terminal_states": 64,
+      "max_shortest_path": 24,
+      "coverage": [
+        "abort-between-admission-and-continuation",
+        "abort-during-work",
+        "queued"
+      ],
+      "seconds": 8.865
+    },
+    {
+      "model": "bridge-and-runner-lanes-0000",
+      "result": "PASS",
+      "states": 3152,
+      "transitions": 7952,
+      "terminal_states": 128,
+      "max_shortest_path": 16,
+      "coverage": [
+        "aborted-predecessor-settled",
+        "old-cleanup-after-new-tail"
+      ],
+      "seconds": 0.049
+    },
+    {
+      "model": "bridge-and-runner-lanes-0001",
+      "result": "PASS",
+      "states": 3824,
+      "transitions": 11232,
+      "terminal_states": 64,
+      "max_shortest_path": 16,
+      "coverage": [
+        "aborted-predecessor-settled",
+        "different-keys-concurrent",
+        "old-cleanup-after-new-tail"
+      ],
+      "seconds": 0.074
+    },
+    {
+      "model": "bridge-and-runner-lanes-0010",
+      "result": "PASS",
+      "states": 4016,
+      "transitions": 12432,
+      "terminal_states": 64,
+      "max_shortest_path": 16,
+      "coverage": [
+        "aborted-predecessor-settled",
+        "different-keys-concurrent",
+        "old-cleanup-after-new-tail"
+      ],
+      "seconds": 0.082
+    },
+    {
+      "model": "bridge-and-runner-lanes-0011",
+      "result": "PASS",
+      "states": 4336,
+      "transitions": 13520,
+      "terminal_states": 64,
+      "max_shortest_path": 16,
+      "coverage": [
+        "aborted-predecessor-settled",
+        "different-keys-concurrent",
+        "old-cleanup-after-new-tail"
+      ],
+      "seconds": 0.089
+    },
+    {
+      "model": "bridge-and-runner-lanes-0100",
+      "result": "PASS",
+      "states": 4048,
+      "transitions": 12688,
+      "terminal_states": 64,
+      "max_shortest_path": 16,
+      "coverage": [
+        "aborted-predecessor-settled",
+        "different-keys-concurrent",
+        "old-cleanup-after-new-tail"
+      ],
+      "seconds": 0.085
+    },
+    {
+      "model": "bridge-and-runner-lanes-0101",
+      "result": "PASS",
+      "states": 4368,
+      "transitions": 13776,
+      "terminal_states": 64,
+      "max_shortest_path": 16,
+      "coverage": [
+        "aborted-predecessor-settled",
+        "different-keys-concurrent",
+        "old-cleanup-after-new-tail"
+      ],
+      "seconds": 0.091
+    },
+    {
+      "model": "bridge-and-runner-lanes-0110",
+      "result": "PASS",
+      "states": 4368,
+      "transitions": 13776,
+      "terminal_states": 64,
+      "max_shortest_path": 16,
+      "coverage": [
+        "aborted-predecessor-settled",
+        "different-keys-concurrent",
+        "old-cleanup-after-new-tail"
+      ],
+      "seconds": 0.091
+    },
+    {
+      "model": "bridge-and-runner-lanes-0111",
+      "result": "PASS",
+      "states": 4048,
+      "transitions": 12688,
+      "terminal_states": 64,
+      "max_shortest_path": 16,
+      "coverage": [
+        "aborted-predecessor-settled",
+        "different-keys-concurrent",
+        "old-cleanup-after-new-tail"
+      ],
+      "seconds": 0.083
+    },
+    {
+      "model": "destination-transfer",
+      "result": "PASS",
+      "states": 2316,
+      "transitions": 8750,
+      "terminal_states": 5,
+      "max_shortest_path": 14,
+      "coverage": [
+        "cancel-before-complete",
+        "duplicate-complete",
+        "lifecycle-abort-while-awaiting-destination",
+        "selected-work",
+        "unselected-released"
+      ],
+      "seconds": 0.059
+    },
+    {
+      "model": "conversation-cancellation",
+      "result": "PASS",
+      "states": 130,
+      "transitions": 289,
+      "terminal_states": 8,
+      "max_shortest_path": 10,
+      "coverage": [
+        "local-cancel-isolated",
+        "parent-cancel-propagated",
+        "two-active-conversations"
+      ],
+      "seconds": 0.002
+    }
+  ],
+  "negative_controls": [
+    {
+      "model": "budget-4-jobs-2-slots",
+      "result": "FAIL",
+      "invariant": "CapacityBound",
+      "states": 20,
+      "transitions": 28,
+      "diagnostic_scope": "trace",
+      "seconds": 0.0,
+      "counterexample": [
+        "request(0)",
+        "request(1)",
+        "request(2)"
+      ],
+      "mutation": "over-admit",
+      "expected_invariant": "CapacityBound",
+      "detected_as_expected": true
+    },
+    {
+      "model": "budget-4-jobs-2-slots",
+      "result": "FAIL",
+      "invariant": "AbortedWaiterRemoved",
+      "states": 52,
+      "transitions": 88,
+      "diagnostic_scope": "trace",
+      "seconds": 0.001,
+      "counterexample": [
+        "request(0)",
+        "request(1)",
+        "request(2)",
+        "abort(2)"
+      ],
+      "mutation": "keep-aborted-waiter",
+      "expected_invariant": "AbortedWaiterRemoved",
+      "detected_as_expected": true
+    },
+    {
+      "model": "budget-4-jobs-2-slots",
+      "result": "FAIL",
+      "invariant": "NoStartAfterObservedAbort",
+      "states": 27,
+      "transitions": 36,
+      "diagnostic_scope": "trace",
+      "seconds": 0.0,
+      "counterexample": [
+        "request(0)",
+        "abort(0)",
+        "start-work(0)"
+      ],
+      "mutation": "omit-abort-recheck",
+      "expected_invariant": "NoStartAfterObservedAbort",
+      "detected_as_expected": true
+    },
+    {
+      "model": "bridge-and-runner-lanes-0001",
+      "result": "FAIL",
+      "invariant": "NoLostLiveTail",
+      "states": 96,
+      "transitions": 205,
+      "diagnostic_scope": "trace",
+      "seconds": 0.001,
+      "counterexample": [
+        "enqueue(0,key=0)",
+        "enqueue(1,key=0)",
+        "abort(0)",
+        "continuation(0)",
+        "cleanup(0)"
+      ],
+      "mutation": "unguarded-cleanup",
+      "expected_invariant": "NoLostLiveTail",
+      "detected_as_expected": true
+    },
+    {
+      "model": "destination-transfer",
+      "result": "FAIL",
+      "invariant": "PromiseFirstResolutionWins",
+      "states": 17,
+      "transitions": 17,
+      "diagnostic_scope": "trace",
+      "seconds": 0.0,
+      "counterexample": [
+        "complete(0)",
+        "complete(1)"
+      ],
+      "mutation": "resolve-twice",
+      "expected_invariant": "PromiseFirstResolutionWins",
+      "detected_as_expected": true
+    },
+    {
+      "model": "destination-transfer",
+      "result": "FAIL",
+      "invariant": "NoTransferStartAfterLifecycleAbort",
+      "states": 168,
+      "transitions": 332,
+      "diagnostic_scope": "trace",
+      "seconds": 0.002,
+      "counterexample": [
+        "complete(0)",
+        "reservation-enters(0)",
+        "abort-transfer-lifecycle",
+        "selected-work-starts(0)"
+      ],
+      "mutation": "omit-transfer-abort-recheck",
+      "expected_invariant": "NoTransferStartAfterLifecycleAbort",
+      "detected_as_expected": true
+    }
+  ],
+  "instance_count": 12,
+  "total_states": 230590,
+  "total_transitions": 1246335,
+  "result": "PASS"
+}
