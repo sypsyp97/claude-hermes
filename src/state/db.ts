@@ -24,10 +24,15 @@ export function openDb(options: OpenDbOptions = {}): Database {
     mkdirSync(dirname(path), { recursive: true });
   }
   const db = new Database(path, options.readonly ? { readonly: true } : undefined);
-  db.exec("PRAGMA journal_mode = WAL;");
-  db.exec("PRAGMA synchronous = NORMAL;");
-  db.exec("PRAGMA foreign_keys = ON;");
-  return db;
+  try {
+    db.exec("PRAGMA journal_mode = WAL;");
+    db.exec("PRAGMA synchronous = NORMAL;");
+    db.exec("PRAGMA foreign_keys = ON;");
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 }
 
 export function closeDb(db: Database): void {

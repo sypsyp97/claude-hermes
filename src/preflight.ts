@@ -12,9 +12,11 @@ import {
   copyFileSync,
   rmSync,
   renameSync,
+  realpathSync,
+  statSync,
   type Dirent,
 } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, isAbsolute, relative, resolve, sep } from "path";
 import { homedir, tmpdir } from "os";
 import { fileURLToPath } from "url";
 import { claudeConfigDir, type ClaudeConfigEnv } from "./runtime/claude-paths";
@@ -110,14 +112,56 @@ export function writeJSON(filePath: string, data: unknown): void {
   writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n");
 }
 
-function copyDirSync(src: string, dest: string): void {
+function containedPath(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+function pluginIdentifier(value: unknown): string {
+  if (typeof value !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value)) {
+    throw new Error("Invalid plugin or marketplace name");
+  }
+  return value;
+}
+
+function pluginDirectory(root: string, source: unknown): string {
+  if (source === undefined) return root;
+  if (typeof source !== "string" || isAbsolute(source)) {
+    throw new Error("Only relative local plugin paths are supported by preflight");
+  }
+  const path = resolve(root, source);
+  if (!containedPath(root, path) || !containedPath(realpathSync(root), realpathSync(path))) {
+    throw new Error(`Plugin path escapes its root: ${source}`);
+  }
+  return path;
+}
+
+/** Validate the full copy before removing an older marketplace or executing dependencies. */
+function validatePluginTree(src: string, root = realpathSync(src)): void {
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    if (entry.name === ".git") continue;
+    const path = join(src, entry.name);
+    if (!containedPath(root, realpathSync(path))) {
+      throw new Error(`Plugin symlink escapes its root: ${entry.name}`);
+    }
+    if (entry.isSymbolicLink() && statSync(path).isDirectory()) {
+      throw new Error(`Directory symlinks are not supported by preflight: ${entry.name}`);
+    }
+    if (entry.isDirectory()) validatePluginTree(path, root);
+  }
+}
+
+function copyDirSync(src: string, dest: string, root = realpathSync(src)): void {
   mkdirSync(dest, { recursive: true });
   for (const entry of readdirSync(src, { withFileTypes: true }) as Dirent[]) {
     if (entry.name === ".git") continue;
     const srcPath = join(src, entry.name);
     const destPath = join(dest, entry.name);
+    if (!containedPath(root, realpathSync(srcPath))) {
+      throw new Error(`Plugin symlink escapes its root: ${entry.name}`);
+    }
     if (entry.isDirectory()) {
-      copyDirSync(srcPath, destPath);
+      copyDirSync(srcPath, destPath, root);
     } else {
       copyFileSync(srcPath, destPath);
     }
@@ -148,11 +192,30 @@ export function isEnabledInProject(pluginKey: string, projectPath: string): bool
   return !!enabled?.[pluginKey];
 }
 
+/** Only a missing file may become a new settings object. Never discard broken permissions. */
+function readObjectForUpdate(filePath: string): Record<string, unknown> {
+  let text: string;
+  try {
+    text = readFileSync(filePath, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
+  }
+  const parsed: unknown = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Expected a JSON object in ${filePath}; refusing to overwrite it`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
 export function enableInProject(pluginKey: string, projectPath: string): void {
   const projSettings = join(projectPath, ".claude", "settings.json");
-  const settings = readJSON<Record<string, unknown>>(projSettings, {});
-  if (!settings.enabledPlugins) settings.enabledPlugins = {};
-  (settings.enabledPlugins as Record<string, boolean>)[pluginKey] = true;
+  const settings = readObjectForUpdate(projSettings);
+  const enabled = settings.enabledPlugins;
+  if (enabled !== undefined && (!enabled || typeof enabled !== "object" || Array.isArray(enabled))) {
+    throw new Error(`Invalid enabledPlugins in ${projSettings}; refusing to overwrite it`);
+  }
+  settings.enabledPlugins = { ...(enabled as Record<string, unknown> | undefined), [pluginKey]: true };
   writeJSON(projSettings, settings);
 }
 
@@ -178,7 +241,7 @@ function startWhisperWarmupInBackground(): void {
 
 // ── Install a single-repo plugin ────────────────────────────────────
 
-function installRepoPlugin(
+export function installRepoPlugin(
   repoUrl: string,
   projectPath: string,
   pkgMgr: string,
@@ -196,9 +259,14 @@ function installRepoPlugin(
     }
 
     const marketplace: MarketplaceJson = JSON.parse(readFileSync(marketplaceJsonPath, "utf-8"));
-    const marketplaceName = marketplace.name;
-    const pluginName = marketplace.plugins[0].name;
-    const skillPath = marketplace.plugins[0].skills?.[0];
+    const marketplaceName = pluginIdentifier(marketplace.name);
+    const plugin = marketplace.plugins[0];
+    const pluginName = pluginIdentifier(plugin?.name);
+    const skillPath = plugin.skills?.[0];
+    // Check every manifest-controlled read before replacing an existing marketplace.
+    const source = pluginDirectory(tempDir, plugin.source);
+    validatePluginTree(source);
+    if (skillPath) pluginDirectory(source, skillPath);
     const pluginKey = `${pluginName}@${marketplaceName}`;
 
     if (isCached(pluginKey, paths.installedPluginsFile) && isEnabledInProject(pluginKey, projectPath)) {
@@ -228,13 +296,13 @@ function installRepoPlugin(
     if (existsSync(cacheDir)) {
       rmSync(cacheDir, { recursive: true, force: true });
     }
-    copyDirSync(marketplaceDir, cacheDir);
+    copyDirSync(pluginDirectory(marketplaceDir, plugin.source), cacheDir);
 
     // Install plugin root deps (used by runtime code under src/)
     installDepsIfPresent(cacheDir, pkgMgr, "root");
 
     if (skillPath) {
-      const skillDir = join(cacheDir, skillPath);
+      const skillDir = pluginDirectory(cacheDir, skillPath);
       installDepsIfPresent(skillDir, pkgMgr, "skill");
     }
 
@@ -290,7 +358,8 @@ function installOfficialPlugins(
   // Check which plugins actually need work before cloning
   const needed: string[] = [];
   const enableOnly: string[] = [];
-  for (const name of pluginNames) {
+  for (const rawName of pluginNames) {
+    const name = pluginIdentifier(rawName);
     const pluginKey = `${name}@${marketplaceName}`;
     if (isCached(pluginKey, paths.installedPluginsFile) && isEnabledInProject(pluginKey, projectPath)) {
       console.log(`  skip: ${pluginKey} (already installed)`);
@@ -330,6 +399,15 @@ function installOfficialPlugins(
     const fullSha = run("git rev-parse HEAD", { cwd: tempDir });
     const shortSha = fullSha.slice(0, 12);
 
+    // Reject malformed source trees before replacing the previous marketplace.
+    for (const name of needed) {
+      const plugin = marketplace.plugins.find((entry) => entry.name === name);
+      if (!plugin) continue;
+      const source = pluginDirectory(tempDir, plugin.source);
+      validatePluginTree(source);
+      if (plugin.skills?.[0]) pluginDirectory(source, plugin.skills[0]);
+    }
+
     // Save the monorepo to marketplaces dir
     const marketplaceDir = join(paths.pluginsDir, "marketplaces", marketplaceName);
     if (existsSync(marketplaceDir)) {
@@ -362,9 +440,7 @@ function installOfficialPlugins(
       console.log(`  install: ${pluginKey}`);
 
       // Cache the plugin's source directory
-      const sourceDir = pluginDef.source
-        ? join(marketplaceDir, pluginDef.source)
-        : marketplaceDir;
+      const sourceDir = pluginDirectory(marketplaceDir, pluginDef.source);
 
       const cacheDir = join(paths.pluginsDir, "cache", marketplaceName, name, shortSha);
       if (existsSync(cacheDir)) {
@@ -384,7 +460,7 @@ function installOfficialPlugins(
       installDepsIfPresent(cacheDir, pkgMgr, "root");
       const skillPath = pluginDef.skills?.[0];
       if (skillPath) {
-        const skillDir = join(cacheDir, skillPath);
+        const skillDir = pluginDirectory(cacheDir, skillPath);
         installDepsIfPresent(skillDir, pkgMgr, "skill");
       }
 

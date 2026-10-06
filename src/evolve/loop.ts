@@ -18,7 +18,6 @@ import {
   commitChanges,
   computeDirtyPaths,
   type GateRunners,
-  hashWorktreePath,
   revertPaths,
   runVerify,
   type VerifyResult,
@@ -31,11 +30,13 @@ export interface EvolveTask {
   body: string;
 }
 
-export type Outcome = "exec-failed" | "verify-failed" | "committed";
+export type Outcome = "dirty-worktree" | "exec-failed" | "verify-failed" | "committed";
 
 export interface EvolveIterationResult {
   outcome: Outcome;
   task: EvolveTask;
+  reason?: string;
+  dirtyPaths?: string[];
   sha?: string | null;
   verify?: VerifyResult;
   exec?: ExecuteResult;
@@ -55,24 +56,23 @@ export async function evolveOnce(
   cwd: string = process.cwd(),
   hooks: LoopHooks = {},
 ): Promise<EvolveIterationResult> {
+  // Without a full worktree/index snapshot, restoring to HEAD could destroy
+  // existing user changes. Check before journaling or starting the executor.
+  const dirtyPaths = await computeDirtyPaths(cwd, hooks.gate);
+  if (dirtyPaths.length > 0) {
+    return {
+      outcome: "dirty-worktree",
+      task,
+      reason: "Commit or stash existing changes, including untracked files, before running evolve.",
+      dirtyPaths,
+    };
+  }
+
   await recordEvent(
     db,
     { kind: "evolve.plan", slot: task.id, summary: task.title },
     cwd,
   );
-
-  const baselineDirtyList = await computeDirtyPaths(cwd, hooks.gate);
-  const baselineDirty = new Set(baselineDirtyList);
-  // Snapshot content hashes for baseline-dirty files so we can tell whether
-  // the subagent touched any of them. Without this snapshot, a file that
-  // was dirty BEFORE the run and modified during the run would be quietly
-  // filtered out of `touchedPaths` — neither reverted on RED nor committed
-  // on GREEN.
-  const hashPath = hooks.gate?.hashPath ?? hashWorktreePath;
-  const baselineHashes = new Map<string, string | null>();
-  for (const path of baselineDirtyList) {
-    baselineHashes.set(path, await hashPath(cwd, path));
-  }
 
   const prompt = (hooks.buildPrompt ?? defaultPrompt)(task);
   const execOpts: ExecuteOptions = { prompt, cwd, taskId: task.id, taskLabel: task.title };
@@ -90,19 +90,7 @@ export async function evolveOnce(
     cwd,
   );
 
-  const touchedPaths = async (): Promise<string[]> => {
-    const after = await computeDirtyPaths(cwd, hooks.gate);
-    const touched = new Set<string>();
-    for (const p of after) {
-      if (!baselineDirty.has(p)) touched.add(p);
-    }
-    for (const p of baselineDirtyList) {
-      const before = baselineHashes.get(p) ?? null;
-      const now = await hashPath(cwd, p);
-      if (now !== before) touched.add(p);
-    }
-    return Array.from(touched).sort();
-  };
+  const touchedPaths = () => computeDirtyPaths(cwd, hooks.gate);
 
   if (!exec.ok) {
     await revertPaths(cwd, await touchedPaths(), hooks.gate);

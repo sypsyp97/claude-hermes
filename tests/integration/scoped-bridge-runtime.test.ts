@@ -43,7 +43,7 @@ beforeEach(async () => {
       agentic: { enabled: false },
       learning: { captureCandidateSkills: false },
       telegram: { token: "fake", allowedUserIds: [1, 2] },
-      discord: { token: "fake", allowedUserIds: ["a", "b"] },
+      discord: { token: "fake", allowedUserIds: ["100000000000000001", "100000000000000002"] },
     })
   );
   process.chdir(cwd);
@@ -174,7 +174,7 @@ test.each(["message", "skill"] as const)(
       if (init?.method === "GET") return Response.json({ name: "work", type: 0 });
       return Response.json({ id: "sent" });
     }) as typeof fetch;
-    const user = { id: "a", username: "Alice", discriminator: "0" };
+    const user = { id: "100000000000000001", username: "Alice", discriminator: "0" };
     const interaction = {
       id: "skill",
       type: 2,
@@ -241,7 +241,7 @@ test.each(["message", "skill"] as const)(
       if (init?.method === "GET") return Response.json({ name: "work", type: 0 });
       return Response.json({ id: "sent" });
     }) as typeof fetch;
-    const author = { id: "a", username: "Alice", discriminator: "0" };
+    const author = { id: "100000000000000001", username: "Alice", discriminator: "0" };
     if (kind === "message")
       await handleMessageCreate("fake", {
         id: "m",
@@ -305,7 +305,7 @@ test.each(["lookup", "attachment", "other-user"] as const)(
       }
       return Response.json({ id: "sent" });
     }) as typeof fetch;
-    const user = { id: "a", username: "Alice", discriminator: "0" };
+    const user = { id: "100000000000000001", username: "Alice", discriminator: "0" };
     const first = handleMessageCreate("fake", {
       id: "m",
       channel_id: "first",
@@ -333,7 +333,7 @@ test.each(["lookup", "attachment", "other-user"] as const)(
       token: "fake",
       channel_id: "second",
       guild_id: "g",
-      member: { user: phase === "other-user" ? { ...user, id: "b" } : user },
+      member: { user: phase === "other-user" ? { ...user, id: "100000000000000002" } : user },
       data: { name: "forget" },
     });
     const completed = await Promise.race([
@@ -344,10 +344,10 @@ test.each(["lookup", "attachment", "other-user"] as const)(
     await Promise.all([first, forget]);
     if (phase === "other-user") {
       expect(completed).toBe(true);
-      expect(getByKey(db, "user:discord:a")).not.toBeNull();
+      expect(getByKey(db, "user:discord:100000000000000001")).not.toBeNull();
       expect(db.query("SELECT * FROM memory_entries").all()).toHaveLength(1);
     } else {
-      expect(getByKey(db, "user:discord:a")).toBeNull();
+      expect(getByKey(db, "user:discord:100000000000000001")).toBeNull();
       expect(db.query("SELECT * FROM memory_entries").all()).toEqual([]);
     }
   }
@@ -372,7 +372,7 @@ test("Discord fire does not deadlock a concurrent thread turn sharing its user s
 
 test("deleting a shared thread waits for its first admitted turn before removing it", async () => {
   const target = discordSessionTarget(
-    { workspace: cwd, channelId: "new-thread", guildId: "g", userId: "a", isThread: true },
+    { workspace: cwd, channelId: "new-thread", guildId: "g", userId: "100000000000000001", isThread: true },
     { ...defaultPolicy({ source: "discord" }), sessionScope: "shared" }
   );
   const running = runUserMessage(
@@ -394,7 +394,13 @@ test("thread deletion removes all thread-owned policy scopes and retains a cross
   const db = await getSharedDb();
   const targets = ["shared", "per-channel-user", "per-thread", "per-user"].map((scope) =>
     discordSessionTarget(
-      { workspace: cwd, channelId: "deleted-thread", guildId: "g", userId: "a", isThread: true },
+      {
+        workspace: cwd,
+        channelId: "deleted-thread",
+        guildId: "g",
+        userId: "100000000000000001",
+        isThread: true,
+      },
       {
         ...defaultPolicy({ source: "discord" }),
         sessionScope: scope as "shared" | "per-channel-user" | "per-thread" | "per-user",
@@ -478,7 +484,7 @@ test("autoThread honors explicit shared scope consistently on creation and conti
     id: "first",
     channel_id: "shared-auto",
     guild_id: "g",
-    author: { id: "a", username: "Alice", discriminator: "0" },
+    author: { id: "100000000000000001", username: "Alice", discriminator: "0" },
     content: "hello",
     attachments: [],
     mentions: [],
@@ -515,7 +521,7 @@ test("autoThread preserves Discord hire/fire management on the parent channel", 
     id: "hire",
     channel_id: "manage",
     guild_id: "g",
-    author: { id: "a", username: "Alice", discriminator: "0" },
+    author: { id: "100000000000000001", username: "Alice", discriminator: "0" },
     content: "hire Alice",
     attachments: [],
     mentions: [],
@@ -551,7 +557,7 @@ test("Discord skill interactions apply autoThread and deliver inside the thread"
     channel_id: "slash-auto",
     guild_id: "g",
     token: "fake",
-    member: { user: { id: "a", username: "Alice", discriminator: "0" } },
+    member: { user: { id: "100000000000000001", username: "Alice", discriminator: "0" } },
     data: { name: "my-report" },
   });
   expect(paths.some((path) => path.endsWith("/channels/slash-thread/messages"))).toBe(true);
@@ -620,7 +626,7 @@ test("Discord admits messages before asynchronous channel lookup", async () => {
     id: "first",
     channel_id: "ordered",
     guild_id: "g",
-    author: { id: "a", username: "Alice", discriminator: "0" },
+    author: { id: "100000000000000001", username: "Alice", discriminator: "0" },
     content: "FIRST",
     attachments: [],
     mentions: [],
@@ -703,7 +709,7 @@ test("Discord autoThread routes work and replies into the created thread", async
     id: "m-auto",
     channel_id: "auto-c",
     guild_id: "g",
-    author: { id: "a", username: "Alice", discriminator: "0" },
+    author: { id: "100000000000000001", username: "Alice", discriminator: "0" },
     content: "hello",
     attachments: [],
     mentions: [],
@@ -722,7 +728,7 @@ test("Discord autoThread routes work and replies into the created thread", async
     id: "m-denied",
     channel_id: "auto-c",
     guild_id: "g",
-    author: { id: "a", username: "Alice", discriminator: "0" },
+    author: { id: "100000000000000001", username: "Alice", discriminator: "0" },
     content: "/deploy",
     attachments: [],
     mentions: [],
@@ -1002,7 +1008,7 @@ test("Discord production handlers enforce live channel policy and isolate slash 
     id: "m1",
     channel_id: "c",
     guild_id: "g",
-    author: { id: "a", username: "Alice", discriminator: "0" },
+    author: { id: "100000000000000001", username: "Alice", discriminator: "0" },
     content: "hello",
     attachments: [],
     mentions: [],
@@ -1012,11 +1018,11 @@ test("Discord production handlers enforce live channel policy and isolate slash 
   await handleMessageCreate("fake", {
     ...message,
     id: "m2",
-    author: { id: "b", username: "Bob", discriminator: "0" },
+    author: { id: "100000000000000002", username: "Bob", discriminator: "0" },
   });
   const db = await getSharedDb();
-  expect(getByKey(db, "channel-user:discord:g:c:a")?.channel).toBe("c");
-  expect(getByKey(db, "channel-user:discord:g:c:b")?.user).toBe("b");
+  expect(getByKey(db, "channel-user:discord:g:c:100000000000000001")?.channel).toBe("c");
+  expect(getByKey(db, "channel-user:discord:g:c:100000000000000002")?.user).toBe("100000000000000002");
   await handleInteractionCreate("fake", {
     id: "i",
     type: 2,
@@ -1026,8 +1032,10 @@ test("Discord production handlers enforce live channel policy and isolate slash 
     member: { user: message.author },
     data: { name: "reset" },
   });
-  expect(getByKey(db, "channel-user:discord:g:c:a")?.claude_session_id).toBeNull();
-  expect(getByKey(db, "channel-user:discord:g:c:b")?.claude_session_id).toBe("scoped-session");
+  expect(getByKey(db, "channel-user:discord:g:c:100000000000000001")?.claude_session_id).toBeNull();
+  expect(getByKey(db, "channel-user:discord:g:c:100000000000000002")?.claude_session_id).toBe(
+    "scoped-session"
+  );
   const before = db.query("SELECT count(*) AS n FROM messages").get();
   upsertPolicy(
     db,
@@ -1042,7 +1050,7 @@ test("Discord acknowledges reset before waiting for the running conversation", a
   const { discordSessionTarget } = await import("../../src/router/bridge-session");
   const { defaultPolicy } = await import("../../src/policy/channel");
   const mine = discordSessionTarget(
-    { workspace: cwd, channelId: "c", guildId: "g", userId: "a" },
+    { workspace: cwd, channelId: "c", guildId: "g", userId: "100000000000000001" },
     defaultPolicy({ source: "discord" })
   );
   let acknowledged = false;
@@ -1059,7 +1067,7 @@ test("Discord acknowledges reset before waiting for the running conversation", a
     channel_id: "c",
     guild_id: "g",
     token: "fake",
-    member: { user: { id: "a", username: "a", discriminator: "0" } },
+    member: { user: { id: "100000000000000001", username: "Alice", discriminator: "0" } },
     data: { name: "reset" },
   });
   await Bun.sleep(100);

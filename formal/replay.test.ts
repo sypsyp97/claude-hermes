@@ -116,3 +116,35 @@ test("formal trace: cancellation wins over later completion and releases reserva
   expect(await enqueueBridge("formal-cancel", "b", async () => "released-b")).toBe("released-b");
   expect(runs).toBe(0);
 });
+
+test("formal trace: failed memory writer does not lose a newer tail", async () => {
+  const { withMemoryFileLock } = await import("../src/memory/file-lock");
+  const firstGate = deferred();
+  const secondGate = deferred();
+  const events: number[] = [];
+  const first = withMemoryFileLock("formal-memory-lane", async () => {
+    await firstGate.promise;
+    throw new Error("first writer failed");
+  });
+  const observedFirst = first.catch(() => {});
+  const second = withMemoryFileLock("formal-memory-lane", async () => {
+    events.push(2);
+    await secondGate.promise;
+  });
+  let third: Promise<void> | undefined;
+  try {
+    firstGate.resolve();
+    await observedFirst;
+    await flush();
+    expect(events).toEqual([2]);
+    third = withMemoryFileLock("formal-memory-lane", async () => { events.push(3); });
+    await flush();
+    expect(events).toEqual([2]);
+    expect(await withMemoryFileLock("formal-other-memory-lane", async () => "independent")).toBe("independent");
+  } finally {
+    firstGate.resolve();
+    secondGate.resolve();
+    await Promise.allSettled([observedFirst, second, ...(third ? [third] : [])]);
+  }
+  expect(events).toEqual([2, 3]);
+});

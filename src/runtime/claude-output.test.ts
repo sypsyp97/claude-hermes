@@ -86,3 +86,19 @@ test("extracts structured Claude result failures even without result text", () =
     error: "Turn limit reached",
   });
 });
+
+test("legacy result envelopes preserve failure semantics", () => {
+  expect(extractSessionAndResult({ session_id: "legacy", is_error: true, result: "request failed" })).toEqual(
+    {
+      sessionId: "legacy",
+      result: "request failed",
+      error: "request failed",
+    }
+  );
+});
+
+test("nonterminal diagnostics cannot impersonate a final reply through a result field", () => {
+  expect(
+    extractSessionAndResult({ type: "system", subtype: "diagnostic", session_id: "s", result: "progress" })
+  ).toEqual({ sessionId: "s" });
+});

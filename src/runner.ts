@@ -594,33 +594,31 @@ async function compactSession(
     }
   }
 
-  const settings = getSettings();
-  const securityArgs = buildSecurityArgs(settings.security);
-  const baseEnv = cleanChildEnv(process.env);
-  const timeoutMs = (settings as any).sessionTimeoutMs || CLAUDE_TIMEOUT_MS;
-
-  const ok = await runCompact(
-    existing.sessionId,
-    (await conversationPreference(session.target)).model ?? session.target.policy?.modelPolicy?.model ?? settings.model,
-    settings.api,
-    baseEnv,
-    [...securityArgs, ...(session.scoped ? claudeSessionArgs(session.target) : [])],
-    timeoutMs
-  );
-
-  const message = ok
-    ? `✅ Session compact complete (${existing.sessionId.slice(0, 8)})`
-    : `❌ Compact failed (${existing.sessionId.slice(0, 8)})`;
-
-  if (sink) {
-    try {
-      if (ok) {
-        await sink.close({ ok: true });
-      } else {
-        await sink.close({ ok: false, errorShort: message });
+  let ok = false;
+  let message = `❌ Compact failed (${existing.sessionId.slice(0, 8)})`;
+  try {
+    const settings = getSettings();
+    const securityArgs = buildSecurityArgs(settings.security);
+    const baseEnv = cleanChildEnv(process.env);
+    const timeoutMs = (settings as any).sessionTimeoutMs || CLAUDE_TIMEOUT_MS;
+    ok = await runCompact(
+      existing.sessionId,
+      (await conversationPreference(session.target)).model ?? session.target.policy?.modelPolicy?.model ?? settings.model,
+      settings.api,
+      baseEnv,
+      [...securityArgs, ...(session.scoped ? claudeSessionArgs(session.target) : [])],
+      timeoutMs
+    );
+    if (ok) message = `✅ Session compact complete (${existing.sessionId.slice(0, 8)})`;
+  } finally {
+    // Admission cancellation and spawn failures reject before runCompact returns.
+    // An already-open sink still owns a heartbeat and must always be closed.
+    if (sink) {
+      try {
+        await sink.close(ok ? { ok: true } : { ok: false, errorShort: message });
+      } catch {
+        // sink failures must never mask the compaction outcome
       }
-    } catch {
-      // sink failures must never break compact
     }
   }
 
@@ -819,39 +817,23 @@ async function execClaude(
     stdout = rateLimitMessage;
   }
 
-  // For new sessions, extract session_id + result text. Streaming has these
-  // already on `exec`; buffered mode requires a JSON.parse of the JSON envelope.
-  if (!rateLimitMessage && isNew && exitCode === 0) {
-    if (sink) {
-      const streamedSessionId = exec.sessionId ?? extractedFromRaw.sessionId;
-      const streamedResult = exec.finalResult ?? extractedFromRaw.result;
-      if (streamedSessionId) {
-        sessionId = streamedSessionId;
-        stdout = streamedResult ?? "";
-        await session.create(sessionId);
-        console.log(`[${new Date().toLocaleTimeString()}] Session created: ${sessionId} (${session.target.key})`);
-      } else if (streamedResult !== undefined) {
-        stdout = streamedResult;
-      }
-    } else {
-      try {
-        const parsed = JSON.parse(rawStdout);
-        const extracted = extractSessionAndResult(parsed);
-        if (!extracted.sessionId) {
-          throw new Error("no session_id in claude --output-format json response");
-        }
-        sessionId = extracted.sessionId;
-        stdout = extracted.result ?? "";
-        await session.create(sessionId);
-        console.log(`[${new Date().toLocaleTimeString()}] Session created: ${sessionId} (${session.target.key})`);
-      } catch (e) {
-        console.error(`[${new Date().toLocaleTimeString()}] Failed to parse session from Claude output:`, e);
-      }
+  const finalResult = exec.finalResult ?? extractedFromRaw.result;
+  if (exitCode === 0 && finalResult === undefined) {
+    exitCode = 1;
+    const incomplete = "Claude output ended without a result; execution outcome is unknown";
+    stderr += `${stderr && !stderr.endsWith("\n") ? "\n" : ""}${incomplete}`;
+  }
+
+  // Both transports accept result objects, arrays and NDJSON. Parse once so a
+  // buffered first turn follows the same extraction rules as resumed turns.
+  if (!rateLimitMessage && exitCode === 0) {
+    stdout = finalResult ?? "";
+    const returnedSessionId = exec.sessionId ?? extractedFromRaw.sessionId;
+    if (isNew && returnedSessionId) {
+      sessionId = returnedSessionId;
+      await session.create(sessionId);
+      console.log(`[${new Date().toLocaleTimeString()}] Session created: ${sessionId} (${session.target.key})`);
     }
-  } else if (!rateLimitMessage && !isNew && exitCode === 0) {
-    // Callers receive the assistant text rather than transport envelopes.
-    const streamedResult = exec.finalResult ?? extractedFromRaw.result;
-    if (streamedResult !== undefined) stdout = streamedResult;
   }
 
   const result: RunResult = {

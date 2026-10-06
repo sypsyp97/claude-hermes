@@ -141,7 +141,9 @@ typecheck → lint → unit → smoke → integration
 并在真实实现上重放关键轨迹（需要 Python 3.10+）。它穷举文档限定的有限状态空间，
 不代表整个程序已被证明正确。详见[形式化验证说明](formal/README.md)和
 [2026-10-04 兼容性审查](docs/FORMAL_COMPATIBILITY_REVIEW.md)，其中记录了当前
-Claude Code 对插件名称校验的兼容性阻塞。
+Claude Code 的插件名称校验限制；校验失败不等于安装或加载失败。
+后续的持久化、消息发送、调度和自我进化安全修复见
+[2026-10-06 深度审查](docs/HARDENING_REVIEW_2026-10-06.md)。
 
 ```bash
 bun run typecheck   # tsc --noEmit

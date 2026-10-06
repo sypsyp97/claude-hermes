@@ -117,3 +117,104 @@ describe("createCoalescer", () => {
     c.dispose();
   });
 });
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+test("slow flushes coalesce later windows instead of queueing redundant concurrent edits", async () => {
+  const started = deferred();
+  const release = deferred();
+  let calls = 0;
+  let active = 0;
+  let peak = 0;
+  const c = createCoalescer(
+    async () => {
+      calls++;
+      active++;
+      peak = Math.max(peak, active);
+      if (calls === 1) {
+        started.resolve();
+        await release.promise;
+      }
+      active--;
+    },
+    { windowMs: 5 }
+  );
+  c.schedule();
+  await started.promise;
+  try {
+    for (let i = 0; i < 4; i++) {
+      c.schedule();
+      await sleep(15);
+    }
+    expect(calls).toBe(1);
+  } finally {
+    release.resolve();
+    await c.forceFlush();
+    c.dispose();
+  }
+  expect(calls).toBe(2);
+  expect(peak).toBe(1);
+});
+
+test("forceFlush waits for an in-flight flush before flushing newer updates", async () => {
+  const started = deferred();
+  const release = deferred();
+  let calls = 0;
+  let settled = false;
+  const c = createCoalescer(
+    async () => {
+      calls++;
+      if (calls === 1) {
+        started.resolve();
+        await release.promise;
+      }
+    },
+    { windowMs: 5 }
+  );
+  c.schedule();
+  await started.promise;
+  c.schedule();
+  const forced = c.forceFlush().then(() => {
+    settled = true;
+  });
+  try {
+    await sleep(10);
+    expect(calls).toBe(1);
+    expect(settled).toBe(false);
+  } finally {
+    release.resolve();
+    await forced;
+    c.dispose();
+  }
+  expect(calls).toBe(2);
+});
+
+test("dispose drops updates collected during an in-flight flush", async () => {
+  const started = deferred();
+  const release = deferred();
+  let calls = 0;
+  const c = createCoalescer(
+    async () => {
+      calls++;
+      if (calls === 1) {
+        started.resolve();
+        await release.promise;
+      }
+    },
+    { windowMs: 5 }
+  );
+  c.schedule();
+  await started.promise;
+  c.schedule();
+  c.dispose();
+  release.resolve();
+  await c.forceFlush();
+  await sleep(15);
+  expect(calls).toBe(1);
+});

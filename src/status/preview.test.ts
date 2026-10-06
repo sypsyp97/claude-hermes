@@ -73,3 +73,52 @@ test("cancellation during initial status posting closes the sink before returnin
   expect(closed).toBe(true);
   expect(result.exitCode).toBe(130);
 });
+
+test("slow status transport emits one latest preview after recovery instead of replaying an edit backlog", async () => {
+  let release!: () => void;
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const edits: string[] = [];
+  let calls = 0;
+  const sink = createDiscordStatusSink({
+    channelId: "backpressure",
+    windowMs: 5,
+    heartbeatMs: 0,
+    preview: true,
+    transport: {
+      async postMessage() {
+        return { id: "status" };
+      },
+      async deleteMessage() {},
+      async patchMessage(_channel, _message, text) {
+        if (++calls === 1) {
+          started();
+          await gate;
+        }
+        edits.push(text);
+      },
+    },
+  });
+  await sink.open("slow", "slow status");
+  await sink.update({ kind: "text_delta", text: "first" });
+  await ready;
+  try {
+    for (let i = 0; i < 4; i++) {
+      await sink.update({ kind: "text_delta", text: ` next-${i}` });
+      await Bun.sleep(15);
+    }
+    release();
+    await Bun.sleep(30);
+    expect(edits.length).toBe(2);
+    expect(edits.at(-1)).toContain("next-3");
+  } finally {
+    release();
+    await sink.close({ ok: true });
+  }
+  expect(edits.at(-1)).toContain("Done");
+});

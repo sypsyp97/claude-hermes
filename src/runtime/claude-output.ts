@@ -34,7 +34,9 @@ export function extractSessionAndResult(parsed: unknown): ClaudeSessionAndResult
   if (!isObject(parsed)) return {};
 
   const sessionId = typeof parsed.session_id === "string" ? parsed.session_id : undefined;
-  if (parsed.type === "result") {
+  const isLegacyResult =
+    parsed.type === undefined && sessionId !== undefined && typeof parsed.result === "string";
+  if (parsed.type === "result" || isLegacyResult) {
     const failed =
       parsed.is_error === true || (typeof parsed.subtype === "string" && parsed.subtype.startsWith("error"));
     const errors = Array.isArray(parsed.errors)
@@ -49,10 +51,7 @@ export function extractSessionAndResult(parsed: unknown): ClaudeSessionAndResult
     };
   }
 
-  return {
-    sessionId,
-    result: typeof parsed.result === "string" ? parsed.result : undefined,
-  };
+  return { sessionId };
 }
 
 export function extractSessionAndResultFromText(raw: string): ClaudeSessionAndResult {

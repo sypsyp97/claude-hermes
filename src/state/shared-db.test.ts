@@ -21,3 +21,25 @@ test("concurrent opens through workspace aliases share one initialized database"
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a failed initialization can be retried after the database is repaired", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hermes-db-retry-"));
+  const { openDb, closeDb } = await import("./db");
+  const { stateDbFile } = await import("../paths");
+  const broken = openDb({ path: stateDbFile(root) });
+  try {
+    // A malformed pre-existing table causes migration 001 to fail.
+    broken.exec("CREATE TABLE sessions (id INTEGER PRIMARY KEY)");
+    const attempt = getSharedDb(root);
+    expect(getSharedDb(root)).toBe(attempt);
+    await expect(attempt).rejects.toThrow();
+    broken.exec("DROP TABLE sessions");
+    const recovered = await getSharedDb(root);
+    expect(recovered.query("SELECT count(*) AS n FROM sessions").get()).toEqual({ n: 0 });
+    expect(await getSharedDb(root)).toBe(recovered);
+  } finally {
+    closeDb(broken);
+    await resetSharedDbCache();
+    await rm(root, { recursive: true, force: true });
+  }
+});

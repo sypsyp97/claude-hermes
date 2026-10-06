@@ -181,6 +181,9 @@ function translateEnvelope(parsed: unknown, state: ParserState): StatusEvent[] {
       const errors = Array.isArray(parsed.errors) ? parsed.errors.filter(e => typeof e === "string").join("; ") : "";
       return [{ kind: "error", message: errors || resultText || String(parsed.subtype ?? "unknown error") }];
     }
+    // Empty final text is valid; absent or non-string text is an incomplete
+    // protocol response and must not synthesize a successful completion.
+    if (typeof parsed.result !== "string") return [];
     const event: Extract<StatusEvent, { kind: "task_complete" }> = {
       kind: "task_complete",
       result: resultText,

@@ -54,7 +54,7 @@ Then point Claude Code at the working tree:
 - **Heartbeat:** periodic check-ins with configurable intervals, quiet hours, and editable prompts. The heartbeat prompt can be an inline string or a file path; edits take effect without restarting the daemon.
 - **Cron jobs:** timezone-aware schedules for repeating or one-time tasks. Job files hot-reload every 30s — no daemon restart needed.
 - **Scaffolder (`/claude-hermes:new`):** `new job <name>`, `new skill <name>`, or `new prompt <name>` writes a template file with sensible frontmatter so you don't hand-craft YAML. Runs as a CLI too: `bun run src/index.ts new job my-job --schedule "0 9 * * *"`.
-- **Self-evolution (`bun run scripts/evolve.ts`):** opt-in local tool that takes a task body (CLI arg or stdin or Discord/Telegram message), asks your local Claude to implement it, runs the full verify pipeline, and commits on green / `git restore`s on red. Small-step, verify-gated, journal-everything discipline. Human-triggered, not a cron — the verify gate is the safety net.
+- **Self-evolution (`bun run scripts/evolve.ts`):** opt-in local tool that takes a task body (CLI arg or stdin or Discord/Telegram message), asks your local Claude to implement it, runs the full verify pipeline, and commits on green / `git restore`s on red. Small-step, verify-gated, journal-everything discipline. Human-triggered, not a cron — the verify gate is the safety net. Requires a clean worktree (commit or stash tracked and untracked changes first), and no concurrent external edits during the run. Keep generated `memory/journal/` and `.claude/` state ignored; dirty worktrees are reported before any self-edit or journal write.
 
 ### Job notification targets
 Job frontmatter accepts `notifyChannel: "DISCORD_CHANNEL_ID"`, `notifyTelegramChat: "TELEGRAM_CHAT_ID"` and optional `notifyTelegramTopic: 42`. You can specify both platforms. Explicit targets receive the result instead of the default recipient list; a missing transport or failed target never falls back to other recipients. Without these fields, the existing default forwarding remains. `notify: false` disables job progress and result notifications; `notify: error` sends only failed results. A topic requires a chat ID, and malformed targets reject the job during loading.
@@ -142,7 +142,9 @@ faulty variants, and selected traces against the real implementation (Python 3.1
 required). It is exhaustive within documented finite bounds, not a proof of the
 whole program. See [formal verification](formal/README.md) and the
 [2026-10-04 compatibility review](docs/FORMAL_COMPATIBILITY_REVIEW.md), including
-the current Claude Code plugin-name validation blocker.
+the current Claude Code plugin-name validation limitation (not an observed
+installation/loading failure). The [2026-10-06 hardening review](docs/HARDENING_REVIEW_2026-10-06.md)
+covers the subsequent persistence, delivery, scheduling and evolve safety pass.
 
 ```bash
 bun run typecheck   # tsc --noEmit

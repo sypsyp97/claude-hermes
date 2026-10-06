@@ -233,3 +233,30 @@ describe("Claude plugin configuration directory", () => {
     expect(JSON.parse(child.stdout.toString())).toEqual([true, false, true, false]);
   });
 });
+
+describe("preflight preserves existing settings", () => {
+  test("refuses to overwrite malformed project settings", async () => {
+    const file = join(tempRoot, ".claude", "settings.json");
+    await mkdir(join(tempRoot, ".claude"), { recursive: true });
+    const original = '{"permissions":{"deny":["Bash"]},';
+    await writeFile(file, original);
+    expect(() => enableInProject("foo@bar", tempRoot)).toThrow();
+    expect(await readFile(file, "utf8")).toBe(original);
+  });
+
+  test("refuses to replace a settings array with enabled plugin flags", async () => {
+    const file = join(tempRoot, ".claude", "settings.json");
+    await mkdir(join(tempRoot, ".claude"), { recursive: true });
+    await writeFile(file, "[]");
+    expect(() => enableInProject("foo@bar", tempRoot)).toThrow();
+    expect(await readFile(file, "utf8")).toBe("[]");
+  });
+
+  test("refuses malformed enabledPlugins rather than claiming an install succeeded", async () => {
+    const file = join(tempRoot, ".claude", "settings.json");
+    writeJSON(file, { enabledPlugins: [] });
+    const original = await readFile(file, "utf8");
+    expect(() => enableInProject("foo@bar", tempRoot)).toThrow();
+    expect(await readFile(file, "utf8")).toBe(original);
+  });
+});

@@ -61,16 +61,14 @@ export async function computeDirtyPaths(
   runners: GateRunners = {},
 ): Promise<string[]> {
   const run = runners.runGit ?? defaultGit;
-  const status = await run(cwd, ["status", "--porcelain"]);
-  if (!status.ok) return [];
+  // NUL framing preserves whitespace, quotes, Unicode and literal " -> ".
+  // Disable rename folding: both paths must remain in commit/rollback scope.
+  const status = await run(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"]);
+  if (!status.ok) throw new Error(`Cannot inspect evolve worktree: ${status.stderr}`);
   const set = new Set<string>();
-  for (const line of status.stdout.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    const body = line.slice(3);
-    const arrow = body.indexOf(" -> ");
-    const path = arrow >= 0 ? body.slice(arrow + 4) : body;
-    const unquoted = path.startsWith('"') && path.endsWith('"') ? path.slice(1, -1) : path;
-    set.add(unquoted);
+  for (const record of status.stdout.split("\0")) {
+    if (!record) continue;
+    set.add(record.slice(3));
   }
   return Array.from(set).sort();
 }
@@ -85,15 +83,19 @@ export async function commitChanges(
   const run = runners.runGit ?? defaultGit;
 
   const add = await run(cwd, ["add", "--", ...paths]);
-  if (!add.ok) return null;
+  if (!add.ok) throw new Error(`Cannot stage evolve changes: ${add.stderr || add.stdout}`);
 
   const staged = await run(cwd, ["diff", "--cached", "--name-only", "--", ...paths]);
-  if (!staged.ok || !staged.stdout.trim()) return null;
+  if (!staged.ok) throw new Error(`Cannot inspect staged evolve changes: ${staged.stderr || staged.stdout}`);
+  if (!staged.stdout.trim()) return null;
 
-  const commit = await run(cwd, ["commit", "-m", message]);
-  if (!commit.ok) return null;
+  const commit = await run(cwd, ["commit", "--only", "-m", message, "--", ...paths]);
+  if (!commit.ok) throw new Error(`Cannot commit evolve changes: ${commit.stderr || commit.stdout}`);
 
   const sha = await run(cwd, ["rev-parse", "HEAD"]);
+  if (!sha.ok || !sha.stdout.trim()) {
+    throw new Error(`Cannot read committed evolve revision: ${sha.stderr || sha.stdout || "empty revision"}`);
+  }
   return sha.stdout.trim();
 }
 
@@ -105,23 +107,26 @@ export async function revertPaths(
   if (paths.length === 0) return;
   const run = runners.runGit ?? defaultGit;
 
-  // Partition the caller's path set into tracked vs untracked. `git restore`
-  // refuses to process any pathspec that has no match in the index — passing
-  // a mixed list would abort before touching the tracked files.
+  // The executor can stage additions/deletions/renames. Classify against
+  // HEAD rather than its modified index so rollback restores the baseline.
   const tracked: string[] = [];
-  const untracked: string[] = [];
-  for (const p of paths) {
-    const r = await run(cwd, ["ls-files", "--error-unmatch", "--", p]);
-    if (r.ok) tracked.push(p);
-    else untracked.push(p);
+  const added: string[] = [];
+  for (const path of paths) {
+    const result = await run(cwd, ["ls-tree", "--name-only", "-z", "HEAD", "--", path]);
+    if (!result.ok) throw new Error(`Cannot inspect evolve rollback path: ${result.stderr}`);
+    if (result.stdout.length > 0) tracked.push(path);
+    else added.push(path);
   }
 
   if (tracked.length > 0) {
-    await run(cwd, ["restore", "--staged", "--", ...tracked]);
-    await run(cwd, ["restore", "--", ...tracked]);
+    const restored = await run(cwd, ["restore", "--source=HEAD", "--staged", "--worktree", "--", ...tracked]);
+    if (!restored.ok) throw new Error(`Cannot restore evolve changes: ${restored.stderr}`);
   }
-  if (untracked.length > 0) {
-    await run(cwd, ["clean", "-fd", "--", ...untracked]);
+  if (added.length > 0) {
+    const unstaged = await run(cwd, ["rm", "--cached", "-f", "--ignore-unmatch", "--", ...added]);
+    if (!unstaged.ok) throw new Error(`Cannot unstage evolve additions: ${unstaged.stderr}`);
+    const cleaned = await run(cwd, ["clean", "-fd", "--", ...added]);
+    if (!cleaned.ok) throw new Error(`Cannot remove evolve additions: ${cleaned.stderr}`);
   }
 }
 
@@ -129,7 +134,7 @@ async function defaultGit(
   cwd: string,
   args: string[],
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  const r = await runProcess("git", args, cwd);
+  const r = await runProcess("git", ["--literal-pathspecs", ...args], cwd);
   return { ok: r.ok, stdout: r.stdout, stderr: r.stderr };
 }
 
@@ -137,6 +142,8 @@ function runProcess(bin: string, args: string[], cwd: string): Promise<VerifyRes
   return new Promise((resolve) => {
     const started = Date.now();
     const proc = spawn(bin, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    proc.stdout?.setEncoding("utf8");
+    proc.stderr?.setEncoding("utf8");
     let stdout = "";
     let stderr = "";
     proc.stdout?.on("data", (chunk) => {

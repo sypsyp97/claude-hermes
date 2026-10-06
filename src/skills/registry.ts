@@ -8,6 +8,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { isSkillPathSegment } from "./path";
 import { readFile, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +31,7 @@ export async function resolveSkillPrompt(
   const colonIdx = name.indexOf(":");
   const pluginHint = colonIdx > 0 ? name.slice(0, colonIdx) : null;
   const skillName = colonIdx > 0 ? name.slice(colonIdx + 1) : name;
+  if (!isSkillPathSegment(skillName) || (pluginHint !== null && !isSkillPathSegment(pluginHint))) return null;
 
   const home = roots?.home ?? homedir();
   const cwd = roots?.cwd ?? process.cwd();

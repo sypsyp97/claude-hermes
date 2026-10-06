@@ -12,6 +12,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { hermesDir } from "../paths";
+import { assertSkillPathSegment } from "../skills/path";
 import type { CandidateSpec } from "./detector";
 
 export interface CompiledSkill {
@@ -33,6 +34,7 @@ export async function compileCandidate(
   spec: CandidateSpec,
   opts: CompileOptions = {}
 ): Promise<CompiledSkill> {
+  assertSkillPathSegment(spec.skillName);
   const cwd = opts.cwd ?? process.cwd();
   const root = join(hermesDir(cwd), "skills", "candidates", spec.skillName);
   await mkdir(root, { recursive: true });

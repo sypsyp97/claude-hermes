@@ -1,5 +1,5 @@
 {
-  "reference_commit": "e0fbf5a77c29ac4008b899df6d8b9293a3f722ee",
+  "reference_commit": "d66adfdc4195343bc45f4104648ffa3dddb7d97b",
   "sources": [
     {
       "path": "src/runtime/execution-budget.ts",
@@ -22,9 +22,14 @@
       "start": "function enqueue<T>",
       "end": "/** Test-only: number of thread queue slots currently held. */",
       "sha256": "b25aac0554100dcd050f5f3f91591a8bfc0e13e9f2239e0b7965d9a4569cb93d"
+    },
+    {
+      "path": "src/memory/file-lock.ts",
+      "sha256": "3a79a3dab61cb44ce4fcd9dfe179c60cae51e3b9be381869a5427b3f252a0292"
     }
   ],
   "reviewed_changes": [
-    "src/runtime/bridge-queue.ts: recheck the captured lifecycle signal after ready resolves, before selected destination work; local correction after reference revision."
+    "All original runtime source hashes match merged PR #4 at d66adfdc4195343bc45f4104648ffa3dddb7d97b.",
+    "Added manual correspondence for the unchanged in-process memory file-lock tail protocol to the non-cancellable subset of the existing finite Lanes model."
   ]
 }

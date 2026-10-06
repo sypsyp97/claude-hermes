@@ -55,7 +55,12 @@ describe("runClaudeStreaming", () => {
   });
 
   test("exit zero without a terminal result is an incomplete run, not a success", async () => {
-    for (const streamEvents of [[], [{ type: "system", subtype: "init", session_id: "incomplete" }]]) {
+    for (const streamEvents of [
+      [],
+      [{ type: "system", subtype: "init", session_id: "incomplete" }],
+      [{ type: "result", subtype: "success", session_id: "incomplete" }],
+      [{ type: "result", subtype: "success", session_id: "incomplete", result: null }],
+    ]) {
       const scenarioPath = await withScenario({ streamEvents });
       const sink = createFakeSink();
       const result = await runClaudeStreaming({

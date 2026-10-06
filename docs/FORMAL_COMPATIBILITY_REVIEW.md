@@ -63,7 +63,8 @@ is additionally part of the unit suite.
 Independent review reran the formal suite and source-drift fence, exercised
 **5,760 parser combinations** and seven subprocess terminal/exit cases, and
 passed 114 focused tests. No open blocker was found in the reviewed runtime
-changes. This does not remove the separate plugin-name installation blocker below.
+changes. Plugin-name validation is a separate limitation described below;
+validation failure alone does not establish installation or loading failure.
 
 ## Bounded formal verification
 
@@ -79,7 +80,7 @@ entire TypeScript program or OS/network behavior. The source hash fence detects
 stale review; it does not prove refinement. Runtime replay tests bridge selected
 traces only.
 
-## Latest CLI manifest blocker
+## CLI manifest validation limitation (updated 2026-10-06)
 
 The real Claude Code 2.1.289 native binary was run with an empty, dedicated config
 root and environment for `--version`, `--help`, and `plugin validate` only.
@@ -87,9 +88,17 @@ Both the pristine baseline and the edited checkout fail plugin validation:
 third-party plugin identifiers beginning `claude-` are reserved. The existing
 `claude-hermes` identifier is therefore rejected in both manifests.
 
+An isolated recheck with the official **2.1.291** native Linux package on
+October 6 still rejects the reserved prefix in both manifests. However, the
+[current official naming documentation](https://code.claude.com/docs/en/plugins-reference#name)
+states that these restrictions apply to `plugin validate`, `plugin init`, and
+`plugin tag`; plugins with existing names still install and load. The earlier
+wording calling this an installation blocker overstated the observed evidence.
+Neither review attempted a real plugin installation/loading acceptance test.
+
 Renaming the public plugin identity changes installation identifiers and command
-namespaces and requires an explicit migration decision. Until that change is
-made and the validator rerun, do not claim full 2.1.289 installation compatibility.
+namespaces and requires an explicit migration decision. No rename is included;
+validator success and full installation/runtime compatibility are not claimed.
 The validator also warns that root `CLAUDE.md` is not automatically loaded as
 plugin context; Hermes's deliberate workspace seeding is a separate mechanism.
 

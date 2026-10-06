@@ -52,6 +52,18 @@ export function evaluatePromotion(
     successRate,
   };
 
+  // Disabling is an explicit opt-out, not a promotion candidate state.
+  if (from === "disabled") {
+    return {
+      skillName,
+      from,
+      to: from,
+      action: "noop",
+      reason: "skill is disabled",
+      stats: packedStats,
+    };
+  }
+
   if (from === "active") {
     // The rollback boundary is the row id captured at promotion time, not a
     // timestamp — sub-millisecond races would otherwise let the data that

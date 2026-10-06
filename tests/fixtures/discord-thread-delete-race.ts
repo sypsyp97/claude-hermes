@@ -32,7 +32,7 @@ handleDispatch("fake", "THREAD_CREATE", {
   type: 11,
   guild_id: "g",
 });
-const user = { id: "a", username: "Alice", discriminator: "0" };
+const user = { id: "100000000000000001", username: "Alice", discriminator: "0" };
 const base = { guild_id: "g", author: user, attachments: [], mentions: [], type: 0 };
 let fireDone = false;
 let replyDone = false;
