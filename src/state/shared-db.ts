@@ -42,30 +42,44 @@ export function getSharedDb(cwd: string = process.cwd()): Promise<Database> {
   if (existing) return existing;
   const promise = (async () => {
     const db = openDb({ path });
-    pathByHandle.set(db, path);
-    await applyMigrations(db);
-    // Import-on-first-open. `importLegacyJson` is idempotent (upserts by
-    // unique key), so re-running it at most costs one extra lookup per
-    // legacy row on every fresh-handle boot — negligible.
     try {
-      await importLegacyJson(db, cwd);
-    } catch {
-      // If the legacy JSON is malformed, swallow and continue. Better to
-      // serve an empty SQLite than to refuse to open the DB at all.
-    }
-    // Existing bridge rows may predate physical-path normalization.
-    db.transaction(() => {
-      for (const row of db
-        .query<{ workspace: string }, []>("SELECT DISTINCT workspace FROM sessions")
-        .all()) {
-        const normalized = canonicalWorkspace(row.workspace);
-        if (normalized !== row.workspace)
-          db.prepare("UPDATE sessions SET workspace = ? WHERE workspace = ?").run(normalized, row.workspace);
+      pathByHandle.set(db, path);
+      await applyMigrations(db);
+      // Import-on-first-open. `importLegacyJson` is idempotent (upserts by
+      // unique key), so re-running it at most costs one extra lookup per
+      // legacy row on every fresh-handle boot — negligible.
+      try {
+        await importLegacyJson(db, cwd);
+      } catch {
+        // If the legacy JSON is malformed, swallow and continue. Better to
+        // serve an empty SQLite than to refuse to open the DB at all.
       }
-    })();
-    return db;
+      // Existing bridge rows may predate physical-path normalization.
+      db.transaction(() => {
+        for (const row of db
+          .query<{ workspace: string }, []>("SELECT DISTINCT workspace FROM sessions")
+          .all()) {
+          const normalized = canonicalWorkspace(row.workspace);
+          if (normalized !== row.workspace)
+            db.prepare("UPDATE sessions SET workspace = ? WHERE workspace = ?").run(
+              normalized,
+              row.workspace
+            );
+        }
+      })();
+      return db;
+    } catch (error) {
+      db.close();
+      throw error;
+    }
   })();
   cache.set(path, promise);
+  // Failed initialization must not poison this workspace for the lifetime of
+  // the process. Keep concurrent callers on the same attempt; let later calls
+  // retry after the underlying permission/schema/disk problem is repaired.
+  void promise.catch(() => {
+    if (cache.get(path) === promise) cache.delete(path);
+  });
   return promise;
 }
 

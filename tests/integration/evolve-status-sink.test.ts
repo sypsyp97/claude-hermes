@@ -85,6 +85,7 @@ describe("evolveOnce with streaming sink", () => {
     process.env.HERMES_FAKE_SCENARIO_PATH = scenarioPath;
 
     try {
+      let statusCalls = 0;
       const result = await evolveOnce(db, task(), tmpRepo, {
         sink,
         gate: {
@@ -96,7 +97,8 @@ describe("evolveOnce with streaming sink", () => {
             durationMs: 1,
           }),
           runGit: async (_cwd, args) => {
-            if (args[0] === "status") return { ok: true, stdout: " M a\n", stderr: "" };
+            if (args[0] === "status")
+              return { ok: true, stdout: statusCalls++ === 0 ? "" : " M a\0", stderr: "" };
             if (args[0] === "rev-parse") return { ok: true, stdout: "abcd1234abcd\n", stderr: "" };
             return { ok: true, stdout: "", stderr: "" };
           },

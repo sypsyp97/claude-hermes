@@ -18,7 +18,7 @@
 import { join } from "node:path";
 
 import { validateSkillManifest } from "../skills/validate";
-import { getSkill, setStatus, upsertSkill } from "../state/repos/skills";
+import { getSkill, upsertSkill, type SkillRow } from "../state/repos/skills";
 import type { Database } from "../state/db";
 
 export interface TrajectoryToolCall {
@@ -249,13 +249,8 @@ export async function promoteIfVerified(
 
   try {
     const existing = getSkill(db, candidate.name);
-    if (existing && existing.status === "active") {
-      return {
-        ok: true,
-        reason: "already-promoted",
-        finalStatus: "active",
-      };
-    }
+    const protectedState = existing && preservedPromotion(existing);
+    if (protectedState) return protectedState;
 
     const skillPath = opts.skillsRoot ? join(opts.skillsRoot, candidate.name) : candidate.name;
     upsertSkill(db, {
@@ -264,31 +259,27 @@ export async function promoteIfVerified(
       status: "candidate",
     });
 
-    let verified: boolean;
+    let verified = false;
     try {
       verified = await opts.runVerify();
     } catch {
-      return {
-        ok: false,
-        reason: "verify-failed",
-        finalStatus: "candidate",
-      };
+      // Re-read below: an operator may have disabled the skill while the
+      // asynchronous verifier ran, including when it rejects.
     }
 
-    if (!verified) {
-      return {
-        ok: false,
-        reason: "verify-failed",
-        finalStatus: "candidate",
-      };
-    }
-
-    setStatus(db, candidate.name, "shadow");
-    return {
-      ok: true,
-      reason: "promoted",
-      finalStatus: "shadow",
-    };
+    return db
+      .transaction((): PromoteResult => {
+        const current = getSkill(db, candidate.name);
+        if (!current) return { ok: false, reason: "candidate-removed", finalStatus: "absent" };
+        const preserved = preservedPromotion(current);
+        if (preserved) return preserved;
+        if (!verified) return { ok: false, reason: "verify-failed", finalStatus: current.status };
+        db.prepare("UPDATE skills SET status = 'shadow' WHERE name = ? AND status = 'candidate'").run(
+          candidate.name
+        );
+        return { ok: true, reason: "promoted", finalStatus: "shadow" };
+      })
+      .immediate();
   } catch {
     return {
       ok: false,
@@ -296,4 +287,13 @@ export async function promoteIfVerified(
       finalStatus: "absent",
     };
   }
+}
+
+/** Preserve explicit opt-outs and transitions completed by another verifier. */
+function preservedPromotion(row: SkillRow): PromoteResult | null {
+  if (row.status === "disabled") return { ok: false, reason: "skill-disabled", finalStatus: "disabled" };
+  if (row.status === "active" || row.status === "shadow") {
+    return { ok: true, reason: "already-promoted", finalStatus: row.status };
+  }
+  return null;
 }

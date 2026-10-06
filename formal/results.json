@@ -2,7 +2,7 @@
   "checker": "exhaustive-explicit-state",
   "source_correspondence": {
     "result": "PASS",
-    "reference_commit": "e0fbf5a77c29ac4008b899df6d8b9293a3f722ee",
+    "reference_commit": "d66adfdc4195343bc45f4104648ffa3dddb7d97b",
     "changed_files": []
   },
   "checks": [
@@ -18,7 +18,7 @@
         "abort-during-work",
         "queued"
       ],
-      "seconds": 0.048
+      "seconds": 0.047
     },
     {
       "model": "budget-6-jobs-4-slots",
@@ -32,7 +32,7 @@
         "abort-during-work",
         "queued"
       ],
-      "seconds": 8.865
+      "seconds": 8.775
     },
     {
       "model": "bridge-and-runner-lanes-0000",
@@ -59,7 +59,7 @@
         "different-keys-concurrent",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.074
+      "seconds": 0.076
     },
     {
       "model": "bridge-and-runner-lanes-0010",
@@ -73,7 +73,7 @@
         "different-keys-concurrent",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.082
+      "seconds": 0.081
     },
     {
       "model": "bridge-and-runner-lanes-0011",
@@ -87,7 +87,7 @@
         "different-keys-concurrent",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.089
+      "seconds": 0.092
     },
     {
       "model": "bridge-and-runner-lanes-0100",
@@ -101,7 +101,7 @@
         "different-keys-concurrent",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.085
+      "seconds": 0.086
     },
     {
       "model": "bridge-and-runner-lanes-0101",
@@ -115,7 +115,7 @@
         "different-keys-concurrent",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.091
+      "seconds": 0.092
     },
     {
       "model": "bridge-and-runner-lanes-0110",
@@ -129,7 +129,7 @@
         "different-keys-concurrent",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.091
+      "seconds": 0.094
     },
     {
       "model": "bridge-and-runner-lanes-0111",
@@ -143,7 +143,7 @@
         "different-keys-concurrent",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.083
+      "seconds": 0.09
     },
     {
       "model": "destination-transfer",
@@ -159,7 +159,7 @@
         "selected-work",
         "unselected-released"
       ],
-      "seconds": 0.059
+      "seconds": 0.058
     },
     {
       "model": "conversation-cancellation",

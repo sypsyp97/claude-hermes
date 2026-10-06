@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -184,5 +184,59 @@ describe("loadSettings / reloadSettings", () => {
 
     const refreshed = await config.reloadSettings();
     expect(refreshed.telegram.token).toBe("second-token");
+  });
+});
+
+describe("configuration trust boundaries", () => {
+  test("Discord IDs come only from the top-level object's final allowlist", async () => {
+    await writeSettings(`{
+      "metadata": {"discord":{"allowedUserIds":[111]}},
+      "discord": {"allowedUserIds":[222], "allowedUserIds":["333"]}
+    }`);
+    expect((await config.reloadSettings()).discord.allowedUserIds).toEqual(["333"]);
+  });
+
+  test("malformed Discord IDs cannot grant access to digit substrings", async () => {
+    await writeSettings(`{"discord":{"allowedUserIds":["user123",-456,7.8,9e2,null,true,{"id":101},"202"]}}`);
+    expect((await config.reloadSettings()).discord.allowedUserIds).toEqual(["202"]);
+  });
+
+  test("escaped Discord field names and numeric channel IDs retain exact identity", async () => {
+    await writeSettings(
+      '{"discord":{"allowedUser\\u0049ds":[1234567890123456789],"listenChannels":[9876543210987654321]}}'
+    );
+    const settings = await config.reloadSettings();
+    expect(settings.discord.allowedUserIds).toEqual(["1234567890123456789"]);
+    expect(settings.discord.listenChannels).toEqual(["9876543210987654321"]);
+  });
+
+  test("a string Telegram allowlist cannot authorize a substring user ID", async () => {
+    await writeSettings(JSON.stringify({ telegram: { token: false, allowedUserIds: "12345" } }));
+    const settings = await config.reloadSettings();
+    expect(settings.telegram.allowedUserIds).toEqual([]);
+    expect(settings.telegram.token).toBe("");
+  });
+
+  test("prompt references cannot read files through symlinks outside the project", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "hermes-prompt-outside-"));
+    const link = join(TEMP_DIR, "linked-prompt.md");
+    try {
+      await writeFile(join(outside, "secret.md"), "outside private content");
+      await symlink(join(outside, "secret.md"), link);
+      expect(await config.resolvePrompt("@file:linked-prompt.md")).toBe("@file:linked-prompt.md");
+    } finally {
+      await rm(link, { force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("prompt references accept dot-prefixed filenames that remain inside the project", async () => {
+    const file = join(TEMP_DIR, "..prompt.md");
+    try {
+      await writeFile(file, "valid project prompt");
+      expect(await config.resolvePrompt("@file:..prompt.md")).toBe("valid project prompt");
+    } finally {
+      await rm(file, { force: true });
+    }
   });
 });

@@ -169,17 +169,15 @@ describe("evolve loop with real git", () => {
     expect(events.length).toBeGreaterThanOrEqual(1);
   });
 
-  test("RED verify + baseline-dirty file further modified: baseline file is restored, not left mutated", async () => {
-    // Tracked file → commit initial → then dirty it in the worktree BEFORE the
-    // evolve run. Then have the subagent modify it further. On RED verify the
-    // subagent's edit must be reverted; the file should come back to the
-    // committed (index) state, not stay in whichever half-modified state the
-    // subagent left it in.
+  test("dirty worktree blocks before execution and preserves staged and unstaged user work", async () => {
     await writeFile(join(tmpRepo, "shared.txt"), "committed content\n", "utf8");
     gitMustSucceed(tmpRepo, ["add", "shared.txt"]);
     gitMustSucceed(tmpRepo, ["commit", "-q", "-m", "seed shared"]);
     const headBefore = gitMustSucceed(tmpRepo, ["rev-parse", "HEAD"]);
+    await writeFile(join(tmpRepo, "shared.txt"), "user staged wip\n", "utf8");
+    gitMustSucceed(tmpRepo, ["add", "shared.txt"]);
     await writeFile(join(tmpRepo, "shared.txt"), "user pre-existing wip\n", "utf8");
+    let executed = false;
 
     // Confirm baseline is dirty before evolve runs.
     const baselineStatus = gitMustSucceed(tmpRepo, ["status", "--porcelain", "shared.txt"]);
@@ -195,6 +193,7 @@ describe("evolve loop with real git", () => {
       tmpRepo,
       {
         async runExec({ cwd }) {
+          executed = true;
           await writeFile(join(cwd, "shared.txt"), "SUBAGENT OVERWROTE IT\n", "utf8");
           return { ok: true, exitCode: 0, durationMs: 1, stdout: "", stderr: "" };
         },
@@ -206,22 +205,19 @@ describe("evolve loop with real git", () => {
       }
     );
 
-    expect(result.outcome).toBe("verify-failed");
+    expect(result.outcome).toBe("dirty-worktree");
+    expect(executed).toBe(false);
+    expect(result.dirtyPaths).toEqual(["shared.txt"]);
 
     // HEAD must not have moved.
     expect(gitMustSucceed(tmpRepo, ["rev-parse", "HEAD"])).toBe(headBefore);
 
-    // Critically: `shared.txt` must NOT still contain the subagent's text. It
-    // should be back to the committed state (revert wiped both the subagent's
-    // edit AND the earlier user wip — that's acceptable because the revert
-    // scope is "everything dirty on this path", and we snapshot only hashes,
-    // not the pre-exec contents). The important invariant is that the
-    // subagent's half-applied edit is gone.
     const after = await readFile(join(tmpRepo, "shared.txt"), "utf8");
-    expect(after).not.toContain("SUBAGENT OVERWROTE IT");
+    expect(after).toBe("user pre-existing wip\n");
+    expect(gitMustSucceed(tmpRepo, ["show", ":shared.txt"])).toBe("user staged wip");
 
     // Clean up so the next subtest starts from a clean tree.
-    gitMustSucceed(tmpRepo, ["checkout", "--", "shared.txt"]);
+    gitMustSucceed(tmpRepo, ["restore", "--source=HEAD", "--staged", "--worktree", "--", "shared.txt"]);
     gitMustSucceed(tmpRepo, ["rm", "-q", "shared.txt"]);
     gitMustSucceed(tmpRepo, ["commit", "-q", "-m", "drop shared"]);
   });

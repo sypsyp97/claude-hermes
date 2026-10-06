@@ -15,9 +15,12 @@
  * missing root by returning an empty directory listing.
  */
 
-import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, lstatSync } from "node:fs";
 import { mkdir, readdir, readFile, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { canonicalWorkspace } from "../paths";
+import { withMemoryFileLock } from "./file-lock";
 
 const AGENT_SUBPATH = ["memory", "agent"];
 
@@ -34,7 +37,7 @@ export interface ViewFileResult {
 export type ViewResult = ViewDirResult | ViewFileResult;
 
 function agentRootFor(cwd?: string): string {
-  return resolve(cwd ?? process.cwd(), ...AGENT_SUBPATH);
+  return resolve(canonicalWorkspace(cwd), ...AGENT_SUBPATH);
 }
 
 function invalidPath(input: string): Error {
@@ -57,7 +60,10 @@ function resolveAgentPath(input: string, cwd: string | undefined, options: { all
   // Empty string / "." are only valid when caller explicitly allows them
   // (view of the root). For write ops they are nonsense.
   if (input === "" || input === ".") {
-    if (options.allowRoot) return root;
+    if (options.allowRoot) {
+      assertNoSymlinks(root, cwd, input);
+      return root;
+    }
     throw invalidPath(input);
   }
 
@@ -82,7 +88,10 @@ function resolveAgentPath(input: string, cwd: string | undefined, options: { all
 
   // Empty `rel` means "the root itself". Allowed only if allowRoot.
   if (rel === "") {
-    if (options.allowRoot) return root;
+    if (options.allowRoot) {
+      assertNoSymlinks(root, cwd, input);
+      return root;
+    }
     throw invalidPath(input);
   }
 
@@ -97,7 +106,43 @@ function resolveAgentPath(input: string, cwd: string | undefined, options: { all
     if (seg === "..") throw invalidPath(input);
   }
 
+  assertNoSymlinks(resolved, cwd, input);
   return resolved;
+}
+
+/** Reject existing symlinks, including memory/ and agent/ themselves.
+ * This protects against linked paths, not a hostile process swapping paths
+ * between validation and an OS operation (which needs OS-level sandboxing). */
+function assertNoSymlinks(target: string, cwd: string | undefined, input: string): void {
+  const workspace = canonicalWorkspace(cwd);
+  let current = workspace;
+  for (const segment of relative(workspace, target).split(sep)) {
+    current = join(current, segment);
+    try {
+      if (lstatSync(current).isSymbolicLink()) throw invalidPath(input);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+  }
+}
+
+/** Root-wide locking also orders directory moves/deletes against child edits. */
+function mutate<T>(cwd: string | undefined, work: (workspace: string) => Promise<T>): Promise<T> {
+  const workspace = canonicalWorkspace(cwd);
+  return withMemoryFileLock(agentRootFor(workspace), () => work(workspace));
+}
+
+/** Leave either the old file or the complete new file after an interrupted edit. */
+async function replaceContents(target: string, content: string): Promise<void> {
+  const temporary = join(dirname(target), `.hermes-memory-${randomUUID()}.tmp`);
+  try {
+    const { mode } = await stat(target);
+    await writeFile(temporary, content, { encoding: "utf8", flag: "wx", mode });
+    await fsRename(temporary, target);
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -136,12 +181,14 @@ export async function view(path: string, cwd?: string): Promise<ViewResult> {
 // ---------------------------------------------------------------------------
 
 export async function create(path: string, content: string, cwd?: string): Promise<void> {
-  const target = resolveAgentPath(path, cwd, { allowRoot: false });
-  if (existsSync(target)) {
-    throw new Error(`file already exists: ${path}`);
-  }
-  await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, content, "utf8");
+  return mutate(cwd, async (workspace) => {
+    const target = resolveAgentPath(path, workspace, { allowRoot: false });
+    if (existsSync(target)) {
+      throw new Error(`file already exists: ${path}`);
+    }
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, content, { encoding: "utf8", flag: "wx" });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -154,32 +201,34 @@ export async function strReplace(
   newString: string,
   cwd?: string
 ): Promise<void> {
-  const target = resolveAgentPath(path, cwd, { allowRoot: false });
-  if (!existsSync(target)) {
-    throw new Error(`file not found: ${path}`);
-  }
-  const original = await readFile(target, "utf8");
+  return mutate(cwd, async (workspace) => {
+    const target = resolveAgentPath(path, workspace, { allowRoot: false });
+    if (!existsSync(target)) {
+      throw new Error(`file not found: ${path}`);
+    }
+    const original = await readFile(target, "utf8");
 
-  // Uniqueness check: count by `split(oldString).length - 1`. This works
-  // even if oldString contains regex metacharacters (we deliberately do not
-  // use a regex). An empty oldString would explode this count, so guard it.
-  if (oldString.length === 0) {
-    throw new Error(`strReplace: oldString must not be empty (path=${path})`);
-  }
-  const occurrences = original.split(oldString).length - 1;
-  if (occurrences === 0) {
-    throw new Error(`strReplace: oldString not found in ${path}`);
-  }
-  if (occurrences > 1) {
-    throw new Error(
-      `strReplace: oldString matches ${occurrences} times in ${path}, must be unique (multiple matches)`
-    );
-  }
+    // Uniqueness check: count by `split(oldString).length - 1`. This works
+    // even if oldString contains regex metacharacters (we deliberately do not
+    // use a regex). An empty oldString would explode this count, so guard it.
+    if (oldString.length === 0) {
+      throw new Error(`strReplace: oldString must not be empty (path=${path})`);
+    }
+    const occurrences = original.split(oldString).length - 1;
+    if (occurrences === 0) {
+      throw new Error(`strReplace: oldString not found in ${path}`);
+    }
+    if (occurrences > 1) {
+      throw new Error(
+        `strReplace: oldString matches ${occurrences} times in ${path}, must be unique (multiple matches)`
+      );
+    }
 
-  // String.replace with a string pattern replaces only the first match,
-  // which is what we want now that we've verified uniqueness.
-  const next = original.replace(oldString, newString);
-  await writeFile(target, next, "utf8");
+    // String.replace with a string pattern replaces only the first match,
+    // which is what we want now that we've verified uniqueness.
+    const next = original.replace(oldString, () => newString);
+    await replaceContents(target, next);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -187,21 +236,23 @@ export async function strReplace(
 // ---------------------------------------------------------------------------
 
 export async function insert(path: string, afterLine: number, content: string, cwd?: string): Promise<void> {
-  const target = resolveAgentPath(path, cwd, { allowRoot: false });
-  if (!existsSync(target)) {
-    throw new Error(`file not found: ${path}`);
-  }
-  const original = await readFile(target, "utf8");
-  const lines = original.split("\n");
+  return mutate(cwd, async (workspace) => {
+    const target = resolveAgentPath(path, workspace, { allowRoot: false });
+    if (!existsSync(target)) {
+      throw new Error(`file not found: ${path}`);
+    }
+    const original = await readFile(target, "utf8");
+    const lines = original.split("\n");
 
-  // afterLine is 1-indexed. 0 prepends. Out-of-range appends.
-  let insertAt: number;
-  if (afterLine <= 0) insertAt = 0;
-  else if (afterLine >= lines.length) insertAt = lines.length;
-  else insertAt = afterLine;
+    // afterLine is 1-indexed. 0 prepends. Out-of-range appends.
+    let insertAt: number;
+    if (afterLine <= 0) insertAt = 0;
+    else if (afterLine >= lines.length) insertAt = lines.length;
+    else insertAt = afterLine;
 
-  lines.splice(insertAt, 0, content);
-  await writeFile(target, lines.join("\n"), "utf8");
+    lines.splice(insertAt, 0, content);
+    await replaceContents(target, lines.join("\n"));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -209,9 +260,11 @@ export async function insert(path: string, afterLine: number, content: string, c
 // ---------------------------------------------------------------------------
 
 export async function del(path: string, cwd?: string): Promise<void> {
-  const target = resolveAgentPath(path, cwd, { allowRoot: false });
-  // Missing path is a no-op. `rm` with `force: true` swallows ENOENT.
-  await rm(target, { force: true, recursive: true });
+  return mutate(cwd, async (workspace) => {
+    const target = resolveAgentPath(path, workspace, { allowRoot: false });
+    // Missing path is a no-op. `rm` with `force: true` swallows ENOENT.
+    await rm(target, { force: true, recursive: true });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -219,14 +272,16 @@ export async function del(path: string, cwd?: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function rename(oldPath: string, newPath: string, cwd?: string): Promise<void> {
-  const src = resolveAgentPath(oldPath, cwd, { allowRoot: false });
-  const dst = resolveAgentPath(newPath, cwd, { allowRoot: false });
-  if (!existsSync(src)) {
-    throw new Error(`rename: source not found: ${oldPath}`);
-  }
-  if (existsSync(dst)) {
-    throw new Error(`rename: destination already exists: ${newPath}`);
-  }
-  await mkdir(dirname(dst), { recursive: true });
-  await fsRename(src, dst);
+  return mutate(cwd, async (workspace) => {
+    const src = resolveAgentPath(oldPath, workspace, { allowRoot: false });
+    const dst = resolveAgentPath(newPath, workspace, { allowRoot: false });
+    if (!existsSync(src)) {
+      throw new Error(`rename: source not found: ${oldPath}`);
+    }
+    if (existsSync(dst)) {
+      throw new Error(`rename: destination already exists: ${newPath}`);
+    }
+    await mkdir(dirname(dst), { recursive: true });
+    await fsRename(src, dst);
+  });
 }

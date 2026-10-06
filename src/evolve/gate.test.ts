@@ -85,10 +85,10 @@ describe("computeDirtyPaths", () => {
   test("parses porcelain output into a sorted set of paths", async () => {
     const runners: GateRunners = {
       runGit: async (_cwd, args) => {
-        expect(args).toEqual(["status", "--porcelain"]);
+        expect(args).toEqual(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"]);
         return {
           ok: true,
-          stdout: " M src/a.ts\n?? new/file.ts\nA  tests/b.test.ts\n",
+          stdout: " M src/a.ts\0?? new/file.ts\0A  tests/b.test.ts\0",
           stderr: "",
         };
       },
@@ -97,16 +97,16 @@ describe("computeDirtyPaths", () => {
     expect(paths).toEqual(["new/file.ts", "src/a.ts", "tests/b.test.ts"]);
   });
 
-  test("handles renames (R  old -> new) by keeping the new path only", async () => {
+  test("keeps both paths when renames are reported as add and delete", async () => {
     const runners: GateRunners = {
       runGit: async () => ({
         ok: true,
-        stdout: "R  src/old.ts -> src/new.ts\n",
+        stdout: "D  src/old.ts\0A  src/new.ts\0",
         stderr: "",
       }),
     };
     const paths = await computeDirtyPaths("/repo", runners);
-    expect(paths).toEqual(["src/new.ts"]);
+    expect(paths).toEqual(["src/new.ts", "src/old.ts"]);
   });
 
   test("returns empty array when tree is clean", async () => {
@@ -116,11 +116,11 @@ describe("computeDirtyPaths", () => {
     expect(await computeDirtyPaths("/repo", runners)).toEqual([]);
   });
 
-  test("returns empty array if git status itself fails", async () => {
+  test("rejects if git status itself fails", async () => {
     const runners: GateRunners = {
       runGit: async () => ({ ok: false, stdout: "", stderr: "not a repo" }),
     };
-    expect(await computeDirtyPaths("/repo", runners)).toEqual([]);
+    await expect(computeDirtyPaths("/repo", runners)).rejects.toThrow("not a repo");
   });
 });
 
@@ -156,7 +156,15 @@ describe("commitChanges (scoped)", () => {
     expect(add).toEqual(["add", "--", "src/foo.ts", "tests/foo.test.ts"]);
     expect(calls.find((c) => c[0] === "add-A" || c.includes("-A"))).toBeUndefined();
     const commit = calls.find((c) => c[0] === "commit");
-    expect(commit).toEqual(["commit", "-m", "evolve: fix bug"]);
+    expect(commit).toEqual([
+      "commit",
+      "--only",
+      "-m",
+      "evolve: fix bug",
+      "--",
+      "src/foo.ts",
+      "tests/foo.test.ts",
+    ]);
   });
 
   test("returns null when nothing staged actually landed (diff --cached empty)", async () => {
@@ -171,7 +179,7 @@ describe("commitChanges (scoped)", () => {
     expect(sha).toBeNull();
   });
 
-  test("returns null when 'git commit' fails", async () => {
+  test("reports when 'git commit' fails", async () => {
     const runners: GateRunners = {
       runGit: async (_cwd, args) => {
         if (args[0] === "add") return { ok: true, stdout: "", stderr: "" };
@@ -180,7 +188,7 @@ describe("commitChanges (scoped)", () => {
         throw new Error("rev-parse should not be reached");
       },
     };
-    expect(await commitChanges("/repo", "oops", ["src/x.ts"], runners)).toBeNull();
+    await expect(commitChanges("/repo", "oops", ["src/x.ts"], runners)).rejects.toThrow("hook failed");
   });
 });
 
@@ -202,22 +210,22 @@ describe("revertPaths (scoped)", () => {
     const runners: GateRunners = {
       runGit: async (_cwd, args) => {
         calls.push(args);
-        if (args[0] === "ls-files") {
-          // src/a.ts exists in the index, new/b.ts does not.
+        if (args[0] === "ls-tree") {
+          // src/a.ts exists in HEAD, new/b.ts does not.
           const path = args[args.length - 1];
           return path === "src/a.ts"
             ? { ok: true, stdout: "src/a.ts\n", stderr: "" }
-            : { ok: false, stdout: "", stderr: "not tracked" };
+            : { ok: true, stdout: "", stderr: "" };
         }
         return { ok: true, stdout: "", stderr: "" };
       },
     };
     await revertPaths("/repo", ["src/a.ts", "new/b.ts"], runners);
 
-    const nonProbe = calls.filter((c) => c[0] !== "ls-files");
+    const nonProbe = calls.filter((c) => c[0] !== "ls-tree");
     expect(nonProbe).toEqual([
-      ["restore", "--staged", "--", "src/a.ts"],
-      ["restore", "--", "src/a.ts"],
+      ["restore", "--source=HEAD", "--staged", "--worktree", "--", "src/a.ts"],
+      ["rm", "--cached", "-f", "--ignore-unmatch", "--", "new/b.ts"],
       ["clean", "-fd", "--", "new/b.ts"],
     ]);
   });
@@ -227,7 +235,7 @@ describe("revertPaths (scoped)", () => {
     const runners: GateRunners = {
       runGit: async (_cwd, args) => {
         calls.push(args);
-        if (args[0] === "ls-files") return { ok: false, stdout: "", stderr: "untracked" };
+        if (args[0] === "ls-tree") return { ok: true, stdout: "", stderr: "" };
         return { ok: true, stdout: "", stderr: "" };
       },
     };
@@ -241,32 +249,34 @@ describe("revertPaths (scoped)", () => {
     }
   });
 
-  test("continues through intermediate restore failures (best-effort)", async () => {
+  test("reports a rollback failure instead of silently claiming success", async () => {
     const calls: string[][] = [];
     const runners: GateRunners = {
       runGit: async (_cwd, args) => {
         calls.push(args);
-        if (args[0] === "ls-files") return { ok: true, stdout: "x\n", stderr: "" };
+        if (args[0] === "ls-tree") return { ok: true, stdout: "x\0", stderr: "" };
         return { ok: false, stdout: "", stderr: "nope" };
       },
     };
-    await revertPaths("/repo", ["x"], runners);
-    // ls-files probe + restore --staged + restore = 3 calls; clean skipped (all tracked).
-    expect(calls.length).toBe(3);
+    await expect(revertPaths("/repo", ["x"], runners)).rejects.toThrow("Cannot restore evolve changes");
+    expect(calls.length).toBe(2);
   });
 
-  test("skips the restore pair entirely when every path is untracked", async () => {
+  test("unstages then cleans additions absent from HEAD", async () => {
     const calls: string[][] = [];
     const runners: GateRunners = {
       runGit: async (_cwd, args) => {
         calls.push(args);
-        if (args[0] === "ls-files") return { ok: false, stdout: "", stderr: "untracked" };
+        if (args[0] === "ls-tree") return { ok: true, stdout: "", stderr: "" };
         return { ok: true, stdout: "", stderr: "" };
       },
     };
     await revertPaths("/repo", ["new-a.ts", "new-b.ts"], runners);
-    const nonProbe = calls.filter((c) => c[0] !== "ls-files");
-    expect(nonProbe).toEqual([["clean", "-fd", "--", "new-a.ts", "new-b.ts"]]);
+    const nonProbe = calls.filter((c) => c[0] !== "ls-tree");
+    expect(nonProbe).toEqual([
+      ["rm", "--cached", "-f", "--ignore-unmatch", "--", "new-a.ts", "new-b.ts"],
+      ["clean", "-fd", "--", "new-a.ts", "new-b.ts"],
+    ]);
   });
 });
 

@@ -154,11 +154,14 @@ async function sendMessage(
   const normalized = text.replace(/\[react:[^\]\r\n]+\]/gi, "").trim();
   if (!normalized) return;
   const MAX_LEN = 2000;
-  for (let i = 0; i < normalized.length; i += MAX_LEN) {
-    const chunk = normalized.slice(i, i + MAX_LEN);
+  for (let i = 0; i < normalized.length;) {
+    let end = Math.min(i + MAX_LEN, normalized.length);
+    if (end < normalized.length && /[\uD800-\uDBFF]/.test(normalized[end - 1])) end--;
+    const chunk = normalized.slice(i, end);
+    i = end;
     const body: Record<string, unknown> = { content: chunk, allowed_mentions: { parse: [] } };
     // Attach components only to the last chunk
-    if (components && i + MAX_LEN >= normalized.length) {
+    if (components && i >= normalized.length) {
       body.components = components;
     }
     await discordApi(token, "POST", `/channels/${channelId}/messages`, body);

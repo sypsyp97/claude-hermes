@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { getSharedDb } from "../state/shared-db";
 import type { Database } from "../state/db";
 import { validateSkillManifest } from "./validate";
+import { assertSkillPathSegment } from "./path";
 
 export interface TrajectoryEntry {
   ts: string;
@@ -38,6 +39,7 @@ function skillsRoot(cwd: string): string {
 }
 
 function skillDir(cwd: string, name: string): string {
+  assertSkillPathSegment(name);
   return join(skillsRoot(cwd), name);
 }
 

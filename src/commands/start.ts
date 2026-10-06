@@ -13,7 +13,7 @@ import {
   type Settings,
 } from "../config";
 import { type Job, clearJobSchedule, loadJobs } from "../jobs";
-import { executeScheduledJob } from "../scheduler";
+import { executeScheduledJob, type JobTickDeps } from "../scheduler";
 import { migrateIfNeeded } from "../migrate/legacy";
 import { migrateLegacyMemory } from "../memory/files";
 import { checkExistingDaemon, cleanupPidFile, writePidFile } from "../pid";
@@ -38,6 +38,22 @@ import {
   runPreflightChecks,
   seedExampleArtifacts,
 } from "../onboarding";
+
+/** Each daemon owns its dispatcher; separate workspaces do not suppress each other. */
+export function createScheduledJobDispatcher(): (job: Job, deps: JobTickDeps) => Promise<void> {
+  const pending = new Map<string, Promise<void>>();
+  return (job, deps) => {
+    const existing = pending.get(job.name);
+    if (existing) return existing;
+    // Install the reservation before running any caller code. Keep it until
+    // the one-shot cleanup finishes so a tick cannot enqueue stale work.
+    const task = Promise.resolve().then(() => executeScheduledJob(job, deps)).finally(() => {
+      if (pending.get(job.name) === task) pending.delete(job.name);
+    });
+    pending.set(job.name, task);
+    return task;
+  };
+}
 
 const PREFLIGHT_SCRIPT = fileURLToPath(new URL("../preflight.ts", import.meta.url));
 
@@ -581,6 +597,8 @@ export async function start(args: string[] = []) {
   // --- Mutable state ---
   let currentSettings: Settings = settings;
   let currentJobs: Job[] = jobs;
+  let completedJobsRevision = 0;
+  const dispatchScheduledJob = createScheduledJobDispatcher();
   let nextHeartbeatAt = 0;
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   const daemonStartedAt = Date.now();
@@ -796,6 +814,7 @@ export async function start(args: string[] = []) {
   setInterval(async () => {
     try {
       const newSettings = await reloadSettings();
+      const jobsRevision = completedJobsRevision;
       const newJobs = await loadJobs();
 
       const hbChanged =
@@ -836,11 +855,13 @@ export async function start(args: string[] = []) {
         .map((j) => `${j.name}:${j.schedule}:${j.prompt}`)
         .sort()
         .join("|");
-      if (jobNames !== oldJobNames) {
+      if (jobsRevision === completedJobsRevision && jobNames !== oldJobNames) {
         console.log(`[${ts()}] Jobs reloaded: ${newJobs.length} job(s)`);
         newJobs.forEach((j) => console.log(`    - ${j.name} [${j.schedule}]`));
       }
-      currentJobs = newJobs;
+      // A one-shot may have completed while loadJobs was reading older file
+      // contents. Leave the current list intact and retry on the next reload.
+      if (jobsRevision === completedJobsRevision) currentJobs = newJobs;
 
       await initTelegram(newSettings.telegram.token);
       await initDiscord(newSettings.discord.token);
@@ -890,11 +911,13 @@ export async function start(args: string[] = []) {
           currentSettings.timezoneOffsetMinutes,
         );
         if (hits.length === 0) continue;
-        void executeScheduledJob(job, {
+        void dispatchScheduledJob(job, {
           resolvePrompt,
           run: (name, prompt, sink) => run(name, prompt, undefined, sink),
           clearJobSchedule: async (name) => {
             await clearJobSchedule(name);
+            completedJobsRevision++;
+            currentJobs = currentJobs.filter((scheduled) => scheduled.name !== name);
             console.log(`[${ts()}] Cleared schedule for one-time job: ${name}`);
           },
           onForward: (label, r) => {
@@ -907,7 +930,7 @@ export async function start(args: string[] = []) {
             console.error(`[${ts()}] Job ${job.name} failed:`, err);
           },
           makeSink: (name) => job.notify === true ? createJobStatusSink(name, currentSettings, job) : undefined,
-        });
+        }).catch((err) => console.error(`[${ts()}] Job ${job.name} dispatch failed:`, err));
       } catch (err) {
         console.error(`[${ts()}] Cron tick error for ${job.name}:`, err);
       }

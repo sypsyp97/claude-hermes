@@ -1,5 +1,5 @@
-import { isAbsolute, relative, resolve } from "path";
-import { mkdir } from "fs/promises";
+import { isAbsolute, relative, resolve, sep } from "path";
+import { mkdir, realpath } from "fs/promises";
 import { existsSync } from "fs";
 import { normalizeTimezoneName, resolveTimezoneOffsetMinutes } from "./timezone";
 import { hermesDir, settingsFile, jobsDir, logsDir } from "./paths";
@@ -286,7 +286,7 @@ function parseAgenticConfig(raw: any): AgenticConfig {
   };
 }
 
-function parseSettings(raw: Record<string, any>, discordUserIdsRaw: string[] = []): Settings {
+function parseSettings(raw: Record<string, any>, discordRaw: any = raw.discord): Settings {
   const rawLevel = raw.security?.level;
   const level: SecurityLevel =
     typeof rawLevel === "string" && VALID_LEVELS.has(rawLevel as SecurityLevel)
@@ -314,22 +314,16 @@ function parseSettings(raw: Record<string, any>, discordUserIdsRaw: string[] = [
       forwardToDiscord: raw.heartbeat?.forwardToDiscord === true,
     },
     telegram: {
-      token: raw.telegram?.token ?? "",
-      allowedUserIds: raw.telegram?.allowedUserIds ?? [],
+      token: typeof raw.telegram?.token === "string" ? raw.telegram.token.trim() : "",
+      allowedUserIds: Array.isArray(raw.telegram?.allowedUserIds)
+        ? raw.telegram.allowedUserIds.filter((id: unknown) => typeof id === "number" && Number.isSafeInteger(id) && id > 0)
+        : [],
     },
     discord: {
       token: typeof raw.discord?.token === "string" ? raw.discord.token.trim() : "",
-      // Snowflake IDs > 2^53 lose precision under JSON.parse. Prefer the raw
-      // string list regex'd out of the source text when available; fall back
-      // to the numeric array so tests that inject settings in-memory still work.
-      allowedUserIds: discordUserIdsRaw.length > 0
-        ? discordUserIdsRaw
-        : Array.isArray(raw.discord?.allowedUserIds)
-          ? raw.discord.allowedUserIds.map(String)
-          : [],
-      listenChannels: Array.isArray(raw.discord?.listenChannels)
-        ? raw.discord.listenChannels.map(String)
-        : [],
+      // Read complete JSON tokens, never digit fragments or nested lookalike keys.
+      allowedUserIds: parseDiscordIds(discordRaw?.allowedUserIds),
+      listenChannels: parseDiscordIds(discordRaw?.listenChannels),
       statusChannelId: typeof raw.discord?.statusChannelId === "string"
         ? raw.discord.statusChannelId.trim()
         : "",
@@ -418,31 +412,34 @@ function parseTimezoneOffsetMinutes(value: unknown, timezoneFallback?: string): 
   return resolveTimezoneOffsetMinutes(value, timezoneFallback);
 }
 
+function parseDiscordIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((id): id is string => typeof id === "string" && /^[1-9]\d*$/.test(id)))];
+}
+
 /**
- * Extract discord.allowedUserIds as raw strings from the JSON text.
- * JSON.parse destroys precision on large numeric snowflakes (>2^53),
- * so we regex them out of the raw text first.
+ * JSON.parse rounds bare snowflakes above 2^53. Parse a second, tokenized copy
+ * with numeric values preserved as strings for Discord IDs only. Matching
+ * complete string tokens first keeps their contents opaque, while JSON.parse
+ * handles nesting, escaped keys and duplicate-key precedence correctly.
  */
-function extractDiscordUserIds(rawText: string): string[] {
-  // Match the "discord" object's "allowedUserIds" array values
-  const discordBlock = rawText.match(/"discord"\s*:\s*\{[\s\S]*?\}/);
-  if (!discordBlock) return [];
-  const arrayMatch = discordBlock[0].match(/"allowedUserIds"\s*:\s*\[([\s\S]*?)\]/);
-  if (!arrayMatch) return [];
-  const items: string[] = [];
-  // Match both quoted strings and bare numbers
-  for (const m of arrayMatch[1].matchAll(/("(\d+)"|(\d+))/g)) {
-    items.push(m[2] ?? m[3]);
+function parseSettingsText(rawText: string): Settings {
+  const raw = JSON.parse(rawText);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("Hermes settings must be a JSON object");
   }
-  return items;
+  const lossless = JSON.parse(rawText.replace(
+    /"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g,
+    (token) => token.startsWith('"') ? token : JSON.stringify(token),
+  ));
+  return parseSettings(raw, lossless.discord);
 }
 
 export async function loadSettings(): Promise<Settings> {
   const path = settingsFile();
   if (cached && cachedPath === path) return cached;
   const rawText = await Bun.file(path).text();
-  const raw = JSON.parse(rawText);
-  cached = parseSettings(raw, extractDiscordUserIds(rawText));
+  cached = parseSettingsText(rawText);
   cachedPath = path;
   return cached;
 }
@@ -451,8 +448,7 @@ export async function loadSettings(): Promise<Settings> {
 export async function reloadSettings(): Promise<Settings> {
   const path = settingsFile();
   const rawText = await Bun.file(path).text();
-  const raw = JSON.parse(rawText);
-  cached = parseSettings(raw, extractDiscordUserIds(rawText));
+  cached = parseSettingsText(rawText);
   cachedPath = path;
   return cached;
 }
@@ -493,7 +489,7 @@ export async function resolvePrompt(prompt: string): Promise<string> {
   const cwd = process.cwd();
   const resolved = resolve(cwd, spec);
   const rel = relative(cwd, resolved);
-  if (rel.startsWith("..") || isAbsolute(rel)) {
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
     console.warn(
       `[config] prompt path "${spec}" escapes project root, using as literal string`
     );
@@ -501,7 +497,13 @@ export async function resolvePrompt(prompt: string): Promise<string> {
   }
 
   try {
-    const content = await Bun.file(resolved).text();
+    const [physicalRoot, physicalFile] = await Promise.all([realpath(cwd), realpath(resolved)]);
+    const physicalRel = relative(physicalRoot, physicalFile);
+    if (physicalRel === ".." || physicalRel.startsWith(`..${sep}`) || isAbsolute(physicalRel)) {
+      console.warn(`[config] prompt path "${spec}" escapes project root through a symlink, using as literal string`);
+      return trimmed;
+    }
+    const content = await Bun.file(physicalFile).text();
     return content.trim();
   } catch {
     console.warn(`[config] Prompt path "${spec}" not found, using as literal string`);

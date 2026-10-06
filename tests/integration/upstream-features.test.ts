@@ -20,7 +20,7 @@ beforeEach(async () => {
       agentic: { enabled: false },
       learning: { captureCandidateSkills: false },
       telegram: { token: "fake", allowedUserIds: [1] },
-      discord: { token: "fake", allowedUserIds: ["a"] },
+      discord: { token: "fake", allowedUserIds: ["100000000000000001"] },
     })
   );
   process.chdir(cwd);
@@ -51,7 +51,7 @@ const tg = { message_id: 1, from: { id: 1, first_name: "Alice" }, chat: { id: 1,
 const dc = {
   id: "m",
   channel_id: "dm",
-  author: { id: "a", username: "Alice", discriminator: "0" },
+  author: { id: "100000000000000001", username: "Alice", discriminator: "0" },
   content: "Compare these",
   attachments: [],
   mentions: [],
@@ -122,9 +122,9 @@ test("channel allowlist grants only the named guild channel, including slash com
   upsertPolicy(
     await getSharedDb(),
     { source: "discord", guild: "g", channel: "allowed" },
-    { mode: "listen", allowedUserIds: ["guest"] }
+    { mode: "listen", allowedUserIds: ["100000000000000003"] }
   );
-  const author = { ...dc.author, id: "guest" };
+  const author = { ...dc.author, id: "100000000000000003" };
   await discord("fake", { ...dc, author, guild_id: "g", channel_id: "allowed", content: "hello guest" });
   expect(responses()).toContain("hello guest");
   requests = [];
@@ -191,7 +191,7 @@ test.each(["discord", "telegram"] as const)(
       platform === "telegram"
         ? telegramSessionTarget({ workspace: cwd, chatId: 1, userId: 1, isDm: true })
         : discordSessionTarget(
-            { workspace: cwd, channelId: "dm", userId: "a" },
+            { workspace: cwd, channelId: "dm", userId: "100000000000000001" },
             defaultPolicy({ source: "discord", isDm: true })
           );
     let release!: () => void;
@@ -242,7 +242,7 @@ test.each(["message", "slash"] as const)(
     const { defaultPolicy } = await import("../../src/policy/channel");
     const { handleInteractionCreate } = await import("../../src/commands/discord");
     const target = discordSessionTarget(
-      { workspace: cwd, channelId: "dm", userId: "a" },
+      { workspace: cwd, channelId: "dm", userId: "100000000000000001" },
       defaultPolicy({ source: "discord", isDm: true })
     );
     const dir = artifactDirectory(cwd, target.key);
@@ -276,13 +276,13 @@ test("a channel-only guest cannot manage other threads through its parent", asyn
   upsertPolicy(
     await getSharedDb(),
     { source: "discord", guild: "g", channel: "parent" },
-    { mode: "listen", allowedUserIds: ["guest"] }
+    { mode: "listen", allowedUserIds: ["100000000000000003"] }
   );
   await discord("fake", {
     ...dc,
     guild_id: "g",
     channel_id: "parent",
-    author: { ...dc.author, id: "guest" },
+    author: { ...dc.author, id: "100000000000000003" },
     content: "delete secret",
   });
   expect(responses()).toContain("globally authorized");
@@ -335,7 +335,7 @@ test.each(["message", "slash"] as const)(
     const { discordSessionTarget } = await import("../../src/router/bridge-session");
     const { defaultPolicy } = await import("../../src/policy/channel");
     const target = discordSessionTarget(
-      { workspace: cwd, channelId: "dm", userId: "a" },
+      { workspace: cwd, channelId: "dm", userId: "100000000000000001" },
       defaultPolicy({ source: "discord", isDm: true })
     );
     let release!: () => void;
@@ -360,7 +360,7 @@ test.each(["message", "slash"] as const)(
       ...dc,
       guild_id: "g",
       channel_id: "slow",
-      author: { ...dc.author, id: "guest" },
+      author: { ...dc.author, id: "100000000000000003" },
     });
     await ready;
     await withActiveConversation(target, async () => {

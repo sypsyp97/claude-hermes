@@ -257,3 +257,40 @@ describe("matchesBetween — catch-up window", () => {
     expect(hits.length).toBeLessThanOrEqual(24 * 60 + 1);
   });
 });
+
+describe("cron grammar boundaries", () => {
+  for (const minute of ["*/2/3", "1-2-3", "1/2/3", `*/${"9".repeat(400)}`]) {
+    test(`rejects malformed minute ${minute.slice(0, 24)}`, () => {
+      expect(() => parseCron(`${minute} * * * *`)).toThrow(CronParseError);
+      expect(cronMatches(`${minute} * * * *`, new Date("2026-01-01T00:00:00Z"))).toBe(false);
+    });
+  }
+});
+
+test("cron iteration uses absolute minutes across host DST fall-back", () => {
+  const script = `import {nextCronMatch,matchesBetween} from ${JSON.stringify(import.meta.dir + "/cron.ts")};
+    const from = new Date("2026-11-01T05:59:00Z");
+    console.log(JSON.stringify([nextCronMatch("* * * * *",from),matchesBetween("* * * * *",from,new Date("2026-11-01T06:01:00Z"))]));`;
+  const result = Bun.spawnSync([process.execPath, "-e", script], {
+    env: { ...process.env, TZ: "America/New_York" },
+  });
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout.toString())).toEqual([
+    "2026-11-01T06:00:00.000Z",
+    ["2026-11-01T06:00:00.000Z", "2026-11-01T06:01:00.000Z"],
+  ]);
+});
+
+test("compiled scan membership matches individual evaluation over offset calendars", () => {
+  const from = new Date("2026-04-13T00:00:00Z");
+  const to = new Date("2026-04-14T00:00:00Z");
+  for (const expr of ["*/7 * * * *", "1,17,59 2-22/3 * * *", "0 0 13-15 4 1-5", "*/10 9-17 * * 1-5"]) {
+    for (const offset of [-330, 0, 345]) {
+      const expected: number[] = [];
+      for (let time = +from + 60_000; time <= +to; time += 60_000) {
+        if (cronMatches(expr, new Date(time), offset)) expected.push(time);
+      }
+      expect(matchesBetween(expr, from, to, offset).map(Number)).toEqual(expected);
+    }
+  }
+});

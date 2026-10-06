@@ -11,7 +11,7 @@
  *
  * Exit codes:
  *   0 — committed
- *   1 — verify failed / subagent failed (details in stderr + journal)
+ *   1 — dirty worktree / verify failed / subagent failed
  *   2 — no task body provided
  */
 
@@ -44,6 +44,8 @@ try {
         outcome: result.outcome,
         taskId: result.task.id,
         sha: result.sha ?? null,
+        reason: result.reason ?? null,
+        dirtyPaths: result.dirtyPaths ?? [],
         verifyOk: result.verify?.ok ?? null,
         execOk: result.exec?.ok ?? null,
       },
@@ -52,7 +54,8 @@ try {
     )}\n`
   );
   if (result.outcome !== "committed") {
-    process.exit(1);
+    if (result.reason) process.stderr.write(`evolve: ${result.reason}\n`);
+    process.exitCode = 1;
   }
 } finally {
   closeDb(db);

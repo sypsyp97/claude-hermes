@@ -52,9 +52,12 @@ function validateField(expr: string, spec: FieldSpec, field: string): void {
   if (!field) throw new CronParseError(expr, `empty ${spec.name} field`);
   for (const part of field.split(",")) {
     if (!part) throw new CronParseError(expr, `empty list element in ${spec.name}`);
+    if (!/^(?:\*|\d+(?:-\d+)?)(?:\/\d+)?$/.test(part)) {
+      throw new CronParseError(expr, `bad syntax "${part}" in ${spec.name}`);
+    }
     const [rangeRaw, stepRaw] = part.split("/");
     if (stepRaw !== undefined) {
-      if (!/^\d+$/.test(stepRaw) || Number(stepRaw) === 0) {
+      if (!Number.isSafeInteger(Number(stepRaw)) || Number(stepRaw) === 0) {
         throw new CronParseError(expr, `bad step "${stepRaw}" in ${spec.name}`);
       }
     }
@@ -141,6 +144,25 @@ export function cronMatches(
   );
 }
 
+/** Compile field membership once for bounded multi-minute scans. */
+function compileMatcher(fields: CronFields, timezoneOffsetMinutes: number): (date: Date) => boolean {
+  const allowed = FIELDS.map((spec) => {
+    const values = new Set<number>();
+    for (let n = spec.min; n <= spec.max; n++) {
+      if (matchCronField(fields[spec.name], n)) values.add(n);
+    }
+    return values;
+  });
+  return (date) => {
+    const shifted = shiftDateToOffset(date, timezoneOffsetMinutes);
+    return allowed[0].has(shifted.getUTCMinutes()) &&
+      allowed[1].has(shifted.getUTCHours()) &&
+      allowed[2].has(shifted.getUTCDate()) &&
+      allowed[3].has(shifted.getUTCMonth() + 1) &&
+      allowed[4].has(shifted.getUTCDay());
+  };
+}
+
 /**
  * Find the next minute after `after` that matches `expr`. Returns null if no
  * match is found within a year — calendars like "Feb 30" are unsatisfiable.
@@ -152,13 +174,14 @@ export function nextCronMatch(
   timezoneOffsetMinutes = 0,
 ): Date | null {
   const fields = typeof expr === "string" ? parseCron(expr) : expr;
+  const matches = compileMatcher(fields, timezoneOffsetMinutes);
   const d = new Date(after);
-  d.setSeconds(0, 0);
-  d.setMinutes(d.getMinutes() + 1);
+  d.setUTCSeconds(0, 0);
+  d.setUTCMinutes(d.getUTCMinutes() + 1);
   const MINUTES_IN_YEAR = 366 * 24 * 60;
   for (let i = 0; i < MINUTES_IN_YEAR; i++) {
-    if (cronMatches(fields, d, timezoneOffsetMinutes)) return new Date(d);
-    d.setMinutes(d.getMinutes() + 1);
+    if (matches(d)) return new Date(d);
+    d.setUTCMinutes(d.getUTCMinutes() + 1);
   }
   return null;
 }
@@ -181,15 +204,19 @@ export function matchesBetween(
   } catch {
     return [];
   }
+  // The normal tick scans one minute; avoid compilation overhead there.
+  const matches = to.getTime() - from.getTime() > 15 * 60_000
+    ? compileMatcher(fields, timezoneOffsetMinutes)
+    : (date: Date) => cronMatches(fields, date, timezoneOffsetMinutes);
   const MAX_LOOKBACK_MIN = 24 * 60;
   const d = new Date(from);
-  d.setSeconds(0, 0);
-  d.setMinutes(d.getMinutes() + 1);
+  d.setUTCSeconds(0, 0);
+  d.setUTCMinutes(d.getUTCMinutes() + 1);
   const hits: Date[] = [];
   for (let i = 0; i <= MAX_LOOKBACK_MIN; i++) {
     if (d.getTime() > to.getTime()) break;
-    if (cronMatches(fields, d, timezoneOffsetMinutes)) hits.push(new Date(d));
-    d.setMinutes(d.getMinutes() + 1);
+    if (matches(d)) hits.push(new Date(d));
+    d.setUTCMinutes(d.getUTCMinutes() + 1);
   }
   return hits;
 }

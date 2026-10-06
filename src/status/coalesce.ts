@@ -10,10 +10,11 @@
  *   - First `schedule()` arms a timer for `windowMs` ms.
  *   - Further `schedule()` calls while armed do nothing — the existing timer
  *     continues to its deadline and then fires exactly once.
- *   - On fire, `flush()` runs. Exceptions are caught and swallowed so one
- *     failed edit doesn't poison subsequent events.
- *   - `forceFlush()` cancels the timer if armed and runs `flush()` right now.
- *     If nothing is pending, it's a no-op.
+ *   - On fire, `flush()` runs. Updates during a slow flush are coalesced into
+ *     one later window; flushes never overlap or build an edit backlog.
+ *     Exceptions are swallowed so one failed edit doesn't poison later events.
+ *   - `forceFlush()` cancels the timer, waits for an in-flight flush, and sends
+ *     any newer pending state. If nothing is pending or active, it's a no-op.
  *   - `dispose()` cancels without running.
  */
 
@@ -35,41 +36,59 @@ export function createCoalescer(
 ): Coalescer {
   const windowMs = options.windowMs ?? DEFAULT_WINDOW_MS;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let pending = false;
+  let inFlight: Promise<void> | null = null;
 
-  async function runFlush(): Promise<void> {
+  function arm(): void {
+    if (timer !== null || inFlight !== null || !pending) return;
+    timer = setTimeout(() => {
+      timer = null;
+      void runFlush();
+    }, windowMs);
+  }
+
+  function cancelTimer(): void {
+    if (timer === null) return;
+    clearTimeout(timer);
     timer = null;
-    try {
-      await flush();
-    } catch {
-      // swallow — caller is a status-display channel, never critical path
-    }
+  }
+
+  function runFlush(): Promise<void> {
+    if (inFlight) return inFlight;
+    if (!pending) return Promise.resolve();
+    pending = false;
+    // Start in a microtask so even a synchronous throw is tracked before the
+    // completion handler clears inFlight and considers the next window.
+    const task = Promise.resolve()
+      .then(flush)
+      .catch(() => {
+        // Status display failures must never mask the underlying task result.
+      })
+      .finally(() => {
+        inFlight = null;
+        arm();
+      });
+    inFlight = task;
+    return task;
   }
 
   return {
     schedule(): void {
-      if (timer !== null) return;
-      timer = setTimeout(() => {
-        void runFlush();
-      }, windowMs);
+      pending = true;
+      arm();
     },
 
     async forceFlush(): Promise<void> {
-      if (timer === null) return;
-      clearTimeout(timer);
-      timer = null;
-      try {
-        await flush();
-      } catch {
-        // swallow — forceFlush is typically called at close(); we don't want
-        // a last-edit failure to mask the underlying task result.
-      }
+      cancelTimer();
+      if (inFlight) await inFlight;
+      // Completion may have armed a trailing window while we were waiting.
+      cancelTimer();
+      await runFlush();
     },
 
     dispose(): void {
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
+      cancelTimer();
+      pending = false;
     },
   };
 }

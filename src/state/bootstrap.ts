@@ -35,11 +35,18 @@ export async function applyMigrations(db: Database): Promise<string[]> {
 
     const sql = await readFile(join(MIGRATIONS_DIR, file), "utf8");
     const now = new Date().toISOString();
-    db.transaction(() => {
-      db.exec(sql);
-      db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, now);
-    })();
-    run.push(version);
+    // The initial snapshot can go stale while reading the SQL file: a second
+    // connection may have just migrated the same database. Acquire the write
+    // lock before rechecking, and record only migrations applied by this call.
+    const migrated = db
+      .transaction(() => {
+        if (db.query("SELECT 1 FROM schema_migrations WHERE version = ?").get(version)) return false;
+        db.exec(sql);
+        db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, now);
+        return true;
+      })
+      .immediate();
+    if (migrated) run.push(version);
   }
 
   return run;

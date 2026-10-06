@@ -26,12 +26,17 @@ export interface BootstrapResult {
 
 export async function bootstrapState(cwd: string = process.cwd()): Promise<BootstrapResult> {
   const db = openDb({ path: stateDbFile(cwd) });
-  const migrationsApplied = await applyMigrations(db);
-  const summary = await importLegacyJson(db, cwd);
-  return {
-    db,
-    migrationsApplied,
-    globalSessionImported: summary.globalSession,
-    threadSessionsImported: summary.threadSessions,
-  };
+  try {
+    const migrationsApplied = await applyMigrations(db);
+    const summary = await importLegacyJson(db, cwd);
+    return {
+      db,
+      migrationsApplied,
+      globalSessionImported: summary.globalSession,
+      threadSessionsImported: summary.threadSessions,
+    };
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 }

@@ -41,7 +41,7 @@ describe("evolveOnce — fake executor", () => {
             statusCalls++;
             return statusCalls === 1
               ? { ok: true, stdout: "", stderr: "" }
-              : { ok: true, stdout: " M src/foo.ts\n", stderr: "" };
+              : { ok: true, stdout: " M src/foo.ts\0", stderr: "" };
           }
           if (args[0] === "add") return { ok: true, stdout: "", stderr: "" };
           if (args[0] === "diff") return { ok: true, stdout: "src/foo.ts\n", stderr: "" };
@@ -78,12 +78,12 @@ describe("evolveOnce — fake executor", () => {
         runGit: async (_cwd, args) => {
           if (args[0] === "status") {
             statusCalls++;
-            // Baseline: user already has an unrelated WIP file dirty.
-            if (statusCalls === 1) return { ok: true, stdout: "?? user-wip.txt\n", stderr: "" };
-            // After exec: user-wip still dirty + new evolve touch.
+            // A clean baseline is required before execution.
+            if (statusCalls === 1) return { ok: true, stdout: "", stderr: "" };
+            // After exec: only the executor's edit is dirty.
             return {
               ok: true,
-              stdout: "?? user-wip.txt\n M src/evolve-edit.ts\n",
+              stdout: " M src/evolve-edit.ts\0",
               stderr: "",
             };
           }
@@ -122,7 +122,7 @@ describe("evolveOnce — fake executor", () => {
           if (args[0] === "status") {
             statusCalls++;
             if (statusCalls === 1) return { ok: true, stdout: "", stderr: "" };
-            return { ok: true, stdout: "?? half-applied.ts\n", stderr: "" };
+            return { ok: true, stdout: "?? half-applied.ts\0", stderr: "" };
           }
           if (args[0] === "restore" || args[0] === "clean") restoreCalls.push(args);
           return { ok: true, stdout: "", stderr: "" };
@@ -157,83 +157,25 @@ describe("evolveOnce — fake executor", () => {
     expect(restoreCalls).toEqual([]);
   });
 
-  // The audit caught this: paths that were dirty BEFORE the subagent ran were
-  // being excluded from `touchedPaths` entirely — so if the subagent modified
-  // an already-dirty file, that change was neither reverted on RED nor staged
-  // on GREEN. Fix is a content-hash snapshot: a baseline path whose bytes
-  // change during exec must land in the touched set.
-  test("subagent edits an already-dirty baseline file → it is reverted on RED", async () => {
-    const restoreCalls: string[][] = [];
-    let hashCalls = 0;
-    const result = await evolveOnce(db, task({ id: "edit-baseline", title: "edit baseline" }), tempRoot, {
-      runExec: async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "", durationMs: 1 }),
-      gate: {
-        runVerify: async () => ({
-          ok: false,
-          exitCode: 1,
-          stdout: "",
-          stderr: "nope",
-          durationMs: 1,
-        }),
-        runGit: async (_cwd, args) => {
-          if (args[0] === "status") {
-            // Baseline and after: the same set of paths is dirty. Only the
-            // *content* of user-wip.txt changes between snapshots.
-            return { ok: true, stdout: " M user-wip.txt\n", stderr: "" };
-          }
-          if (args[0] === "restore" || args[0] === "clean") restoreCalls.push(args);
-          if (args[0] === "ls-files") return { ok: true, stdout: "user-wip.txt\n", stderr: "" };
-          return { ok: true, stdout: "", stderr: "" };
-        },
-        hashPath: async (_cwd, path) => {
-          hashCalls++;
-          // First snapshot (baseline): one content. Second snapshot (after
-          // exec): different content. Any hash stability will cause the
-          // path to be excluded from touched and the test to fail.
-          if (path !== "user-wip.txt") return null;
-          return hashCalls === 1 ? "hash-before" : "hash-after";
-        },
-      },
-    });
-
-    expect(result.outcome).toBe("verify-failed");
-    // The baseline-dirty file must be reverted because the subagent touched it.
-    const touchedRestore = restoreCalls.filter((c) => c.includes("user-wip.txt"));
-    expect(touchedRestore.length).toBeGreaterThan(0);
-  });
-
-  test("baseline-dirty file NOT touched by subagent is preserved (not reverted)", async () => {
-    const restoreCalls: string[][] = [];
+  test("already-dirty work is preserved without starting the executor", async () => {
+    let executed = false;
+    const gitCalls: string[][] = [];
     const result = await evolveOnce(db, task({ id: "preserve-wip", title: "preserve wip" }), tempRoot, {
-      runExec: async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "", durationMs: 1 }),
+      runExec: async () => {
+        executed = true;
+        return { ok: true, exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+      },
       gate: {
-        runVerify: async () => ({
-          ok: false,
-          exitCode: 1,
-          stdout: "",
-          stderr: "nope",
-          durationMs: 1,
-        }),
         runGit: async (_cwd, args) => {
-          if (args[0] === "status") {
-            return { ok: true, stdout: " M user-wip.txt\n M evolve.ts\n", stderr: "" };
-          }
-          if (args[0] === "restore" || args[0] === "clean") restoreCalls.push(args);
-          if (args[0] === "ls-files") return { ok: true, stdout: "x\n", stderr: "" };
-          return { ok: true, stdout: "", stderr: "" };
-        },
-        // Only evolve.ts changes; user-wip.txt hash is stable across both
-        // snapshots, so it must never appear in a restore/clean call.
-        hashPath: async (_cwd, path) => {
-          if (path === "user-wip.txt") return "stable";
-          if (path === "evolve.ts") return String(Math.random()); // always fresh
-          return null;
+          gitCalls.push(args);
+          return { ok: true, stdout: " M user-wip.txt\0?? new-notes.txt\0", stderr: "" };
         },
       },
     });
-    expect(result.outcome).toBe("verify-failed");
-    for (const call of restoreCalls) {
-      expect(call).not.toContain("user-wip.txt");
-    }
+    expect(result.outcome).toBe("dirty-worktree");
+    expect(result.dirtyPaths).toEqual(["new-notes.txt", "user-wip.txt"]);
+    expect(result.reason).toContain("Commit or stash");
+    expect(executed).toBe(false);
+    expect(gitCalls).toHaveLength(1);
   });
 });

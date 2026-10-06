@@ -42,8 +42,8 @@ prove that a subprocess, network call, or arbitrary callback eventually returns.
 The recorded complete run checked **12 model instances, 230,590 states and
 1,246,335 transitions**, with no invariant violation or nonterminal deadlock.
 `results.json` contains per-instance counts, coverage, elapsed time, and negative
-control traces. The real-source replay suite passed **5 tests / 18 assertions**
-using Bun 1.3.4. Four checker-diagnostic self-tests also pass: deadlock witness
+control traces. The real-source replay suite passed **6 tests / 22 assertions**
+using Bun 1.3.4, including the October 6 memory-writer ordering replay. Four checker-diagnostic self-tests also pass: deadlock witness
 accuracy, edge-local failures to already-seen states, initial-state failures, and
 global missing-coverage reporting. Counts exclude mutation searches, which stop
 at their first failure.
@@ -68,9 +68,10 @@ Models are verified independently; their concurrent composition is not verified.
 
 ## Source correspondence
 
-Reference revision: `e0fbf5a77c29ac4008b899df6d8b9293a3f722ee`, plus the
-local transfer-abort correction described below and in the manifest. The final
-hash check passed against the working tree containing that correction.
+Reference revision: `d66adfdc4195343bc45f4104648ffa3dddb7d97b` (merged PR #4),
+including the transfer-abort correction described below. The October 6 review
+retains the original runtime hashes and adds the unchanged memory file-lock
+protocol to the source correspondence fence.
 The correspondence is manually reviewed, not mechanically derived or proved.
 `source-manifest.json` hashes the modeled modules and the runner's enqueue
 function. The hash fence detects **review staleness only**, not correctness or
@@ -120,6 +121,27 @@ The abort-and-skip transition specifically corresponds to the bridge's abort
 check. For the runner, this is also an abstraction of a callback rejecting before
 useful work; the runner's queue itself has no such abort check. The cancellation
 behavior of arbitrary runner callback bodies is not inferred from this model.
+
+### Memory writers: `src/memory/file-lock.ts`
+
+The existing Lanes model also covers this lock as a **non-cancellable subset**:
+`pending[key]` is the tail, the prior tail is captured synchronously before
+`pending.set`, and `predecessor.catch().then(work)` waits for settlement even
+when the prior writer rejects. `result.catch()` supplies the stored tail and
+identity-guarded `finally` removes only its own tail. Extra catch microtasks
+are stuttering steps; they do not permit overlapping work for one key.
+
+The new source replay rejects an earlier writer while a newer tail exists,
+queues another writer, and checks FIFO plus independent-key progress. Agent
+memory mutation callers provide canonical physical workspace-root keys, ordering
+rename/delete with child edits. `file-lock` alone normalizes lexical paths; it
+does not prove aliases are equivalent. The checked bounds are unchanged.
+
+This mapping assumes finite enqueues, callback settlement and Promise progress,
+with no recursively awaited same-key acquisition. It proves no cross-process
+exclusion, symlink-race defense, read consistency, filesystem atomicity or crash
+durability. Those are outside this transition system. Stable symlink rejection,
+exclusive create and atomic edit replacement have separate regression tests.
 
 ### Transfers: `src/runtime/bridge-queue.ts:prepareBridgeTransfer`
 

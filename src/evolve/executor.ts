@@ -10,6 +10,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { cleanChildEnv } from "../runner";
 import { claudeArgv } from "../runtime/claude-cli";
 import { runClaudeStreaming } from "../runtime/claude-stream";
 import type { StatusSink } from "../status/sink";
@@ -58,11 +59,25 @@ export async function executeSelfEdit(opts: ExecuteOptions): Promise<ExecuteResu
 
   const started = Date.now();
   return new Promise((resolve) => {
-    const proc = spawn(bin, args, { cwd: opts.cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const proc = spawn(bin, args, { cwd: opts.cwd, stdio: ["ignore", "pipe", "pipe"], env: cleanChildEnv(process.env) });
+    // Decode across chunk boundaries, not independently per Buffer.
+    proc.stdout?.setEncoding("utf8");
+    proc.stderr?.setEncoding("utf8");
     let stdout = "";
     let stderr = "";
     let killTimer: ReturnType<typeof setTimeout> | null = null;
+    let timedOut = false;
+    let exited = false;
+    const closeInterruptedPipes = () => {
+      if (!timedOut || !exited) return;
+      proc.stdout?.destroy();
+      proc.stderr?.destroy();
+    };
+    proc.on("exit", () => { exited = true; closeInterruptedPipes(); });
     const timer = setTimeout(() => {
+      timedOut = true;
+      closeInterruptedPipes();
+      stderr += `Claude self-edit timed out after ${timeoutMs / 1000}s\n`;
       try { proc.kill("SIGTERM"); } catch {}
       // If the child ignores SIGTERM (handler installed, or wedged in a
       // syscall), follow up with SIGKILL so `proc.on("close")` always fires.
@@ -82,8 +97,8 @@ export async function executeSelfEdit(opts: ExecuteOptions): Promise<ExecuteResu
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
       resolve({
-        ok: code === 0,
-        exitCode: code ?? -1,
+        ok: !timedOut && code === 0,
+        exitCode: timedOut ? 124 : code ?? -1,
         stdout,
         stderr,
         durationMs: Date.now() - started,
@@ -111,11 +126,13 @@ async function runStreamingExec(opts: ExecuteOptions): Promise<ExecuteResult> {
   const streamOpts: Parameters<typeof runClaudeStreaming>[0] = {
     args,
     cwd: opts.cwd,
+    env: cleanChildEnv(process.env),
     sink: opts.sink!,
     taskId: opts.taskId ?? "evolve",
     label: opts.taskLabel ?? "evolve",
   };
   if (opts.timeoutMs !== undefined) streamOpts.timeoutMs = opts.timeoutMs;
+  if (opts.killEscalationMs !== undefined) streamOpts.killEscalationMs = opts.killEscalationMs;
   if (opts.claudeBin !== undefined) streamOpts.claudeBin = opts.claudeBin;
   const result = await runClaudeStreaming(streamOpts);
   return {
