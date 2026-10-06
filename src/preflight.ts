@@ -17,6 +17,7 @@ import {
 import { join, dirname } from "path";
 import { homedir, tmpdir } from "os";
 import { fileURLToPath } from "url";
+import { claudeConfigDir, type ClaudeConfigEnv } from "./runtime/claude-paths";
 
 // ── Plugin repos to install (one plugin per repo) ───────────────────
 const PLUGINS = [
@@ -42,10 +43,26 @@ const OFFICIAL_PLUGINS = [
 
 // ── Config ──────────────────────────────────────────────────────────
 const OFFICIAL_REPO = "https://github.com/anthropics/claude-plugins-official";
-const PLUGINS_DIR = join(homedir(), ".claude", "plugins");
-const INST_FILE = join(PLUGINS_DIR, "installed_plugins.json");
-const MKTP_FILE = join(PLUGINS_DIR, "known_marketplaces.json");
 const WHISPER_WARMUP_SCRIPT = fileURLToPath(new URL("./whisper-warmup.ts", import.meta.url));
+
+export interface ClaudePluginPaths {
+  pluginsDir: string;
+  installedPluginsFile: string;
+  knownMarketplacesFile: string;
+}
+
+/** Resolve once per preflight run, or explicitly inject home/env for isolated use. */
+export function claudePluginPaths(
+  home: string = homedir(),
+  env: ClaudeConfigEnv = process.env,
+): ClaudePluginPaths {
+  const pluginsDir = join(claudeConfigDir(home, env), "plugins");
+  return {
+    pluginsDir,
+    installedPluginsFile: join(pluginsDir, "installed_plugins.json"),
+    knownMarketplacesFile: join(pluginsDir, "known_marketplaces.json"),
+  };
+}
 
 interface PluginEntry {
   scope: string;
@@ -117,7 +134,7 @@ export function extractRepo(url: string): string {
   return url.replace(/.*github\.com[:/]/, "").replace(/\.git$/, "");
 }
 
-export function isCached(pluginKey: string, instFile: string = INST_FILE): boolean {
+export function isCached(pluginKey: string, instFile: string = claudePluginPaths().installedPluginsFile): boolean {
   const instData = readJSON<InstalledPlugins>(instFile, { version: 2, plugins: {} });
   const entries = instData.plugins[pluginKey];
   if (!entries || entries.length === 0) return false;
@@ -165,6 +182,7 @@ function installRepoPlugin(
   repoUrl: string,
   projectPath: string,
   pkgMgr: string,
+  paths: ClaudePluginPaths,
 ): "installed" | "enabled" | "skipped" {
   let tempDir: string | null = null;
   try {
@@ -183,12 +201,12 @@ function installRepoPlugin(
     const skillPath = marketplace.plugins[0].skills?.[0];
     const pluginKey = `${pluginName}@${marketplaceName}`;
 
-    if (isCached(pluginKey) && isEnabledInProject(pluginKey, projectPath)) {
+    if (isCached(pluginKey, paths.installedPluginsFile) && isEnabledInProject(pluginKey, projectPath)) {
       console.log(`  skip: ${pluginKey} (already installed)`);
       return "skipped";
     }
 
-    if (isCached(pluginKey)) {
+    if (isCached(pluginKey, paths.installedPluginsFile)) {
       console.log(`  enable: ${pluginKey} (cached, enabling for project)`);
       enableInProject(pluginKey, projectPath);
       return "enabled";
@@ -196,7 +214,7 @@ function installRepoPlugin(
 
     console.log(`  install: ${pluginKey}`);
 
-    const marketplaceDir = join(PLUGINS_DIR, "marketplaces", marketplaceName);
+    const marketplaceDir = join(paths.pluginsDir, "marketplaces", marketplaceName);
     if (existsSync(marketplaceDir)) {
       rmSync(marketplaceDir, { recursive: true, force: true });
     }
@@ -206,7 +224,7 @@ function installRepoPlugin(
     const fullSha = run("git rev-parse HEAD", { cwd: marketplaceDir });
     const shortSha = fullSha.slice(0, 12);
 
-    const cacheDir = join(PLUGINS_DIR, "cache", marketplaceName, pluginName, shortSha);
+    const cacheDir = join(paths.pluginsDir, "cache", marketplaceName, pluginName, shortSha);
     if (existsSync(cacheDir)) {
       rmSync(cacheDir, { recursive: true, force: true });
     }
@@ -223,15 +241,15 @@ function installRepoPlugin(
     const now = new Date().toISOString().replace(/\.\d{3}Z$/, ".000Z");
     const repo = extractRepo(repoUrl);
 
-    const mktpData = readJSON<Record<string, unknown>>(MKTP_FILE, {});
+    const mktpData = readJSON<Record<string, unknown>>(paths.knownMarketplacesFile, {});
     mktpData[marketplaceName] = {
       source: { source: "github", repo },
       installLocation: marketplaceDir,
       lastUpdated: now,
     };
-    writeJSON(MKTP_FILE, mktpData);
+    writeJSON(paths.knownMarketplacesFile, mktpData);
 
-    const instData = readJSON<InstalledPlugins>(INST_FILE, { version: 2, plugins: {} });
+    const instData = readJSON<InstalledPlugins>(paths.installedPluginsFile, { version: 2, plugins: {} });
     instData.plugins[pluginKey] = [
       {
         scope: "project",
@@ -243,7 +261,7 @@ function installRepoPlugin(
         projectPath: projectPath,
       },
     ];
-    writeJSON(INST_FILE, instData);
+    writeJSON(paths.installedPluginsFile, instData);
 
     enableInProject(pluginKey, projectPath);
     return "installed";
@@ -260,6 +278,7 @@ function installOfficialPlugins(
   pluginNames: string[],
   projectPath: string,
   pkgMgr: string,
+  paths: ClaudePluginPaths,
 ): { installed: number; skipped: number } {
   if (pluginNames.length === 0) return { installed: 0, skipped: 0 };
 
@@ -273,10 +292,10 @@ function installOfficialPlugins(
   const enableOnly: string[] = [];
   for (const name of pluginNames) {
     const pluginKey = `${name}@${marketplaceName}`;
-    if (isCached(pluginKey) && isEnabledInProject(pluginKey, projectPath)) {
+    if (isCached(pluginKey, paths.installedPluginsFile) && isEnabledInProject(pluginKey, projectPath)) {
       console.log(`  skip: ${pluginKey} (already installed)`);
       skipped++;
-    } else if (isCached(pluginKey)) {
+    } else if (isCached(pluginKey, paths.installedPluginsFile)) {
       enableOnly.push(name);
     } else {
       needed.push(name);
@@ -312,7 +331,7 @@ function installOfficialPlugins(
     const shortSha = fullSha.slice(0, 12);
 
     // Save the monorepo to marketplaces dir
-    const marketplaceDir = join(PLUGINS_DIR, "marketplaces", marketplaceName);
+    const marketplaceDir = join(paths.pluginsDir, "marketplaces", marketplaceName);
     if (existsSync(marketplaceDir)) {
       rmSync(marketplaceDir, { recursive: true, force: true });
     }
@@ -322,13 +341,13 @@ function installOfficialPlugins(
     const now = new Date().toISOString().replace(/\.\d{3}Z$/, ".000Z");
 
     // Update known_marketplaces.json once
-    const mktpData = readJSON<Record<string, unknown>>(MKTP_FILE, {});
+    const mktpData = readJSON<Record<string, unknown>>(paths.knownMarketplacesFile, {});
     mktpData[marketplaceName] = {
       source: { source: "github", repo },
       installLocation: marketplaceDir,
       lastUpdated: now,
     };
-    writeJSON(MKTP_FILE, mktpData);
+    writeJSON(paths.knownMarketplacesFile, mktpData);
 
     // Install each requested plugin
     for (const name of needed) {
@@ -347,7 +366,7 @@ function installOfficialPlugins(
         ? join(marketplaceDir, pluginDef.source)
         : marketplaceDir;
 
-      const cacheDir = join(PLUGINS_DIR, "cache", marketplaceName, name, shortSha);
+      const cacheDir = join(paths.pluginsDir, "cache", marketplaceName, name, shortSha);
       if (existsSync(cacheDir)) {
         rmSync(cacheDir, { recursive: true, force: true });
       }
@@ -370,7 +389,7 @@ function installOfficialPlugins(
       }
 
       // Register in installed_plugins.json
-      const instData = readJSON<InstalledPlugins>(INST_FILE, { version: 2, plugins: {} });
+      const instData = readJSON<InstalledPlugins>(paths.installedPluginsFile, { version: 2, plugins: {} });
       instData.plugins[pluginKey] = [
         {
           scope: "project",
@@ -382,7 +401,7 @@ function installOfficialPlugins(
           projectPath: projectPath,
         },
       ];
-      writeJSON(INST_FILE, instData);
+      writeJSON(paths.installedPluginsFile, instData);
 
       enableInProject(pluginKey, projectPath);
       installed++;
@@ -400,7 +419,11 @@ function installOfficialPlugins(
 
 // ── Main ────────────────────────────────────────────────────────────
 
-export function preflight(projectPath: string): void {
+export function preflight(
+  projectPath: string,
+  roots: { home?: string; env?: ClaudeConfigEnv } = {},
+): void {
+  const paths = claudePluginPaths(roots.home, roots.env);
   try { run("git --version"); } catch {
     console.error("preflight: git is required but not installed.");
     process.exit(1);
@@ -412,8 +435,8 @@ export function preflight(projectPath: string): void {
     process.exit(1);
   }
 
-  mkdirSync(join(PLUGINS_DIR, "marketplaces"), { recursive: true });
-  mkdirSync(join(PLUGINS_DIR, "cache"), { recursive: true });
+  mkdirSync(join(paths.pluginsDir, "marketplaces"), { recursive: true });
+  mkdirSync(join(paths.pluginsDir, "cache"), { recursive: true });
   startWhisperWarmupInBackground();
 
   let installed = 0;
@@ -422,7 +445,7 @@ export function preflight(projectPath: string): void {
   // Standalone repos
   for (const repoUrl of PLUGINS) {
     try {
-      const result = installRepoPlugin(repoUrl, projectPath, pkgMgr);
+      const result = installRepoPlugin(repoUrl, projectPath, pkgMgr, paths);
       if (result === "installed" || result === "enabled") installed++;
       else skipped++;
     } catch (err: any) {
@@ -431,7 +454,7 @@ export function preflight(projectPath: string): void {
   }
 
   // Official monorepo (cherry-picked)
-  const official = installOfficialPlugins(OFFICIAL_PLUGINS, projectPath, pkgMgr);
+  const official = installOfficialPlugins(OFFICIAL_PLUGINS, projectPath, pkgMgr, paths);
   installed += official.installed;
   skipped += official.skipped;
 

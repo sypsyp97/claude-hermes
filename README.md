@@ -137,6 +137,13 @@ The self-evolution loop only commits a change if all five are green; otherwise i
 
 ## Development
 
+`bun run verify:formal` separately checks bounded runtime state models, deliberate
+faulty variants, and selected traces against the real implementation (Python 3.10+
+required). It is exhaustive within documented finite bounds, not a proof of the
+whole program. See [formal verification](formal/README.md) and the
+[2026-10-04 compatibility review](docs/FORMAL_COMPATIBILITY_REVIEW.md), including
+the current Claude Code plugin-name validation blocker.
+
 ```bash
 bun run typecheck   # tsc --noEmit
 bun run lint        # biome check src tests scripts

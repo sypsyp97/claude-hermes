@@ -41,6 +41,10 @@ jobs:
       - name: Verify (typecheck + lint + unit + smoke + integration)
         run: bun run verify
 
+      - name: Verify bounded runtime models and replay witnesses
+        if: matrix.os == 'ubuntu-latest' && matrix.bun == '1.3.4'
+        run: bun run verify:formal
+
       - name: Coverage report
         if: matrix.os == 'ubuntu-latest' && matrix.bun == '1.3.4'
         run: |

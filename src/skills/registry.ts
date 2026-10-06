@@ -11,6 +11,7 @@ import { existsSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { claudeConfigDir } from "../runtime/claude-paths";
 import { discoverSkills, type DiscoveryRoots, type SkillInfo } from "./discovery";
 
 export type { SkillInfo, SkillSource } from "./discovery";
@@ -32,9 +33,10 @@ export async function resolveSkillPrompt(
 
   const home = roots?.home ?? homedir();
   const cwd = roots?.cwd ?? process.cwd();
+  const configDir = claudeConfigDir(home, roots?.env ?? (roots?.home === undefined ? process.env : {}));
   const projectSkillsDir = join(cwd, ".claude", "skills");
-  const globalSkillsDir = join(home, ".claude", "skills");
-  const pluginsDir = join(home, ".claude", "plugins");
+  const globalSkillsDir = join(configDir, "skills");
+  const pluginsDir = join(configDir, "plugins");
 
   if (!pluginHint) {
     const projectContent = await tryReadFile(join(projectSkillsDir, skillName, "SKILL.md"));

@@ -133,3 +133,97 @@ describe("resolveSkillPrompt", () => {
     expect(await resolveSkillPrompt("cached", roots)).toBe("CACHED BODY");
   });
 });
+
+describe("skill registry configuration roots", () => {
+  test("lists custom-root global and plugin skills with project precedence", async () => {
+    const configDir = join(tempRoot, "list-config");
+    await writeSkill(projectSkillsDir, "shared", "Project wins");
+    await writeSkill(globalSkillsDir, "wrong-home", "Unrelated home skill");
+    await writeSkill(join(configDir, "skills"), "shared", "Custom global shadowed");
+    await writeSkill(join(configDir, "skills"), "custom-global", "Custom global");
+    await writeSkill(
+      join(configDir, "plugins", "cache", "market", "plugin", "v1", "skills"),
+      "cached",
+      "Custom plugin"
+    );
+    const skills = await listSkills({ ...roots, env: { CLAUDE_CONFIG_DIR: configDir } });
+    expect(skills.map((skill) => skill.name).sort()).toEqual(["custom-global", "market_cached", "shared"]);
+    expect(skills.find((skill) => skill.name === "shared")?.source).toBe("project");
+  });
+
+  test("resolves custom-root global and cached plugin prompts without changing project precedence", async () => {
+    const configDir = join(tempRoot, "resolve-config");
+    const customRoots = { ...roots, env: { CLAUDE_CONFIG_DIR: configDir } };
+    await writeSkill(projectSkillsDir, "shared", "Project wins");
+    await writeSkill(globalSkillsDir, "wrong-home", "Unrelated home skill");
+    await writeSkill(join(configDir, "skills"), "shared", "Custom global shadowed");
+    await writeSkill(join(configDir, "skills"), "custom-global", "Custom global");
+    await writeSkill(
+      join(configDir, "plugins", "cache", "market", "plugin", "v1", "skills"),
+      "cached-skill",
+      "Custom plugin"
+    );
+    expect(await resolveSkillPrompt("shared", customRoots)).toBe("Project wins");
+    expect(await resolveSkillPrompt("custom-global", customRoots)).toBe("Custom global");
+    expect(await resolveSkillPrompt("cached-skill", customRoots)).toBe("Custom plugin");
+    expect(await resolveSkillPrompt("market:cached-skill", customRoots)).toBe("Custom plugin");
+    expect(await resolveSkillPrompt("/market_cached_skill", customRoots)).toBe("Custom plugin");
+    expect(await resolveSkillPrompt("wrong-home", customRoots)).toBeNull();
+  });
+
+  test("runtime readers honor environment changes after import and keep explicit homes isolated", async () => {
+    const configDirs = [join(tempRoot, "runtime-one"), join(tempRoot, "runtime-two")];
+    await writeSkill(globalSkillsDir, "home-only", "Explicit home");
+    await writeSkill(projectSkillsDir, "shared", "Project wins");
+    for (const [index, configDir] of configDirs.entries()) {
+      await writeSkill(join(configDir, "skills"), "shared", "Custom global shadowed");
+      await writeSkill(join(configDir, "skills"), "custom-global", `Global ${index}`);
+      await writeSkill(
+        join(configDir, "plugins", "cache", "market", "plugin", "v1", "skills"),
+        "cached",
+        `Plugin ${index}`
+      );
+    }
+    const script = `
+      const { discoverSkills } = await import(${JSON.stringify(new URL("./discovery.ts", import.meta.url).href)});
+      const { listSkills, resolveSkillPrompt } = await import(${JSON.stringify(new URL("./registry.ts", import.meta.url).href)});
+      const runtimeRoots = { cwd: ${JSON.stringify(fakeProject)} };
+      const isolatedRoots = ${JSON.stringify(roots)};
+      const found = [];
+      for (const configDir of ${JSON.stringify(configDirs)}) {
+        process.env.CLAUDE_CONFIG_DIR = configDir;
+        found.push({
+          discovered: (await discoverSkills(runtimeRoots)).map(skill => skill.name).sort(),
+          listed: (await listSkills(runtimeRoots)).map(skill => skill.name).sort(),
+          global: await resolveSkillPrompt("custom-global", runtimeRoots),
+          plugin: await resolveSkillPrompt("market:cached", runtimeRoots),
+          shared: await resolveSkillPrompt("shared", runtimeRoots),
+          isolated: (await discoverSkills(isolatedRoots)).map(skill => skill.name).sort(),
+          isolatedList: (await listSkills(isolatedRoots)).map(skill => skill.name).sort(),
+          isolatedPrompt: await resolveSkillPrompt("home-only", isolatedRoots),
+          excludedPrompt: await resolveSkillPrompt("custom-global", isolatedRoots),
+        });
+      }
+      console.log(JSON.stringify(found));
+    `;
+    const child = Bun.spawnSync([process.execPath, "-e", script], {
+      env: { ...process.env, CLAUDE_CONFIG_DIR: join(tempRoot, "import-time-config") },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(child.exitCode).toBe(0);
+    expect(JSON.parse(child.stdout.toString())).toEqual(
+      configDirs.map((_, index) => ({
+        discovered: ["custom-global", "market_cached", "shared"],
+        listed: ["custom-global", "market_cached", "shared"],
+        global: `Global ${index}`,
+        plugin: `Plugin ${index}`,
+        shared: "Project wins",
+        isolated: ["home-only", "shared"],
+        isolatedList: ["home-only", "shared"],
+        isolatedPrompt: "Explicit home",
+        excludedPrompt: null,
+      }))
+    );
+  });
+});

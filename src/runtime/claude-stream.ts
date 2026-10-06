@@ -186,6 +186,10 @@ async function stream(opts: StreamingOptions): Promise<StreamingResult> {
       if (killTimer) clearTimeout(killTimer);
       await pendingEvents;
       await handleEvents(parser.flush());
+      if (processOk && interruptedCode === undefined && !errorShort && finalResult === undefined) {
+        errorShort = "Claude stream ended without a result; execution outcome is unknown";
+        stderr += `${stderr && !stderr.endsWith("\n") ? "\n" : ""}${errorShort}`;
+      }
       const ok = processOk && !errorShort && interruptedCode === undefined;
       const exitCode = interruptedCode ?? (errorShort ? processExitCode || 1 : processExitCode);
       const closeErrorShort = ok

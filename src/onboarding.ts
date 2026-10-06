@@ -1,5 +1,4 @@
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { execFile, spawn } from "node:child_process";
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -74,13 +73,16 @@ function defaultWhich(binary: string): Promise<string | null> {
 }
 
 async function isInsideGitRepo(cwd: string): Promise<boolean> {
-  let current = resolve(cwd);
-  while (true) {
-    if (existsSync(join(current, ".git"))) return true;
-    const parent = dirname(current);
-    if (parent === current) return false;
-    current = parent;
-  }
+  // A .git entry alone may be a placeholder or an invalid gitfile. Let Git
+  // validate the repository, including linked worktrees and parent discovery.
+  return new Promise((resolvePromise) => {
+    execFile(
+      "git",
+      ["rev-parse", "--is-inside-work-tree"],
+      { cwd, encoding: "utf8", timeout: 5_000, maxBuffer: 1_024, windowsHide: true },
+      (error, stdout) => resolvePromise(error === null && stdout.trim() === "true"),
+    );
+  });
 }
 
 async function checkHermesDirWritable(cwd: string): Promise<boolean> {

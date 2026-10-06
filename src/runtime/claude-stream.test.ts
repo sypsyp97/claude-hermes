@@ -31,6 +31,51 @@ async function withScenario(scenario: Record<string, unknown>): Promise<string> 
 }
 
 describe("runClaudeStreaming", () => {
+  test("empty terminal text and legacy typed-less results retain success", async () => {
+    for (const terminal of [
+      { type: "result", subtype: "success", result: "", session_id: "empty" },
+      { session_id: "legacy", result: "legacy reply" },
+    ]) {
+      const scenarioPath = await withScenario({ streamEvents: [terminal] });
+      const sink = createFakeSink();
+      const result = await runClaudeStreaming({
+        args: ["-p", "go"],
+        cwd: tempRoot,
+        env: { ...process.env, HERMES_FAKE_SCENARIO_PATH: scenarioPath },
+        sink,
+        taskId: "compatible-result",
+        label: "compatible-result",
+        claudeBin: FAKE_CLAUDE,
+      });
+      expect(result.ok).toBe(true);
+      expect(result.exitCode).toBe(0);
+      expect(result.finalResult).toBe(terminal.result);
+      expect(result.sessionId).toBe(terminal.session_id);
+    }
+  });
+
+  test("exit zero without a terminal result is an incomplete run, not a success", async () => {
+    for (const streamEvents of [[], [{ type: "system", subtype: "init", session_id: "incomplete" }]]) {
+      const scenarioPath = await withScenario({ streamEvents });
+      const sink = createFakeSink();
+      const result = await runClaudeStreaming({
+        args: ["-p", "go"],
+        cwd: tempRoot,
+        env: { ...process.env, HERMES_FAKE_SCENARIO_PATH: scenarioPath },
+        sink,
+        taskId: "incomplete",
+        label: "incomplete",
+        claudeBin: FAKE_CLAUDE,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("without a result");
+      const closeCall = sink.calls.at(-1);
+      expect(closeCall?.kind).toBe("close");
+      if (closeCall?.kind === "close") expect(closeCall.result.ok).toBe(false);
+    }
+  });
+
   test("deadline closes pipes inherited by a background process after the CLI exits", async () => {
     const script = join(tempRoot, "inherited-pipes.ts");
     await writeFile(

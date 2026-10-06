@@ -8,8 +8,8 @@ import { cleanChildEnv } from "./runner";
 //      prompts back to the parent window instead of running headless.
 //   2. Use the parent's exec path / entrypoint in diagnostics that are wrong
 //      for the daemon.
-// cleanChildEnv strips the whole CLAUDE_CODE_* namespace plus the legacy
-// CLAUDECODE flag so the child boots like a fresh terminal invocation.
+// Known operator configuration survives, while parent signalling and unknown
+// CLAUDE_CODE_* fields are stripped so the child is a fresh invocation.
 describe("cleanChildEnv — strips parent Claude Code signalling vars", () => {
   test("strips CLAUDECODE", () => {
     const env = cleanChildEnv({ CLAUDECODE: "1", HOME: "/home/a" });
@@ -64,5 +64,52 @@ describe("cleanChildEnv — strips parent Claude Code signalling vars", () => {
     for (const v of Object.values(env)) {
       expect(typeof v).toBe("string");
     }
+  });
+
+  test("preserves documented provider, headless and resource controls", () => {
+    const controls = {
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      CLAUDE_CODE_USE_VERTEX: "1",
+      CLAUDE_CODE_USE_FOUNDRY: "1",
+      CLAUDE_CODE_USE_MANTLE: "1",
+      CLAUDE_CODE_USE_ANTHROPIC_AWS: "1",
+      CLAUDE_CODE_SKIP_BEDROCK_AUTH: "1",
+      CLAUDE_CODE_SKIP_VERTEX_AUTH: "1",
+      CLAUDE_CODE_SKIP_FOUNDRY_AUTH: "1",
+      CLAUDE_CODE_SKIP_MANTLE_AUTH: "1",
+      CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH: "1",
+      CLAUDE_CODE_OAUTH_TOKEN: "test-token-not-a-real-credential",
+      CLAUDE_CODE_MCP_ALLOWLIST_ENV: "1",
+      CLAUDE_CODE_MCP_STARTUP_WAIT_MS: "2500",
+      CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES: "0",
+      CLAUDE_CODE_DISABLE_WEB_FETCH: "1",
+      CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS: "1",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: "8192",
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "64000",
+      CLAUDE_CODE_MAX_TURNS: "10",
+      CLAUDE_CODE_MAX_RETRIES: "0",
+      CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: "2",
+      CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "2",
+      CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
+    };
+    const result = cleanChildEnv(controls);
+    for (const [name, value] of Object.entries(controls)) expect(result[name]).toBe(value);
+    expect(result.HERMES_PARENT_PID).toBe(String(process.pid));
+  });
+
+  test("does not inherit session identity, memory overrides or automatic replay", () => {
+    const transient = {
+      CLAUDE_CODE_CHILD_SESSION: "parent",
+      CLAUDE_CODE_BRIDGE_SESSION_ID: "parent",
+      CLAUDE_CODE_REMOTE_SESSION_ID: "parent",
+      CLAUDE_CODE_MESSAGING_SOCKET: "/tmp/parent.sock",
+      CLAUDE_CODE_MESSAGING_TOKEN: "not-a-real-token",
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: "0",
+      CLAUDE_CODE_RESUME_INTERRUPTED_TURN: "1",
+      CLAUDE_CODE_TASK_LIST_ID: "shared-parent",
+    };
+    const result = cleanChildEnv(transient);
+    for (const name of Object.keys(transient)) expect(result).not.toHaveProperty(name);
   });
 });

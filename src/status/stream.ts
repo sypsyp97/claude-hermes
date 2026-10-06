@@ -32,9 +32,15 @@ export interface StreamParser {
   flush(): StatusEvent[];
 }
 
+interface ParserState {
+  messageId: string;
+  activeBlockIndex?: number;
+  streamed: Map<string, string>;
+}
+
 export function createStreamParser(): StreamParser {
   let buffer = "";
-  const state = { messageId: "", streamed: new Set<string>() };
+  const state: ParserState = { messageId: "", streamed: new Map() };
 
   return {
     push(chunk: string): StatusEvent[] {
@@ -58,7 +64,7 @@ export function createStreamParser(): StreamParser {
   };
 }
 
-function translateLine(raw: string, state: { messageId: string; streamed: Set<string> }): StatusEvent[] {
+function translateLine(raw: string, state: ParserState): StatusEvent[] {
   const trimmed = raw.trim();
   if (!trimmed) return [];
   let parsed: unknown;
@@ -67,6 +73,15 @@ function translateLine(raw: string, state: { messageId: string; streamed: Set<st
   } catch {
     return [];
   }
+  return translateEnvelope(parsed, state);
+}
+
+function translateEnvelope(parsed: unknown, state: ParserState): StatusEvent[] {
+  // Some CLI adapters emit the buffered JSON array even in streaming mode.
+  // Apply the same terminal-result and error semantics to every envelope.
+  if (Array.isArray(parsed)) {
+    return parsed.flatMap((item) => isObject(item) ? translateEnvelope(item, state) : []);
+  }
   if (!isObject(parsed)) return [];
   const type = parsed.type;
 
@@ -74,10 +89,18 @@ function translateLine(raw: string, state: { messageId: string; streamed: Set<st
     const event = parsed.event;
     if (event.type === "message_start" && isObject(event.message)) {
       state.messageId = typeof event.message.id === "string" ? event.message.id : "";
+      state.activeBlockIndex = undefined;
       state.streamed.clear();
     }
+    if ((event.type === "content_block_start" || event.type === "content_block_delta") && Number.isInteger(event.index)) {
+      state.activeBlockIndex = event.index as number;
+    }
+    if (event.type === "content_block_stop" && state.activeBlockIndex === event.index) {
+      state.activeBlockIndex = undefined;
+    }
     if (event.type === "content_block_delta" && isObject(event.delta) && event.delta.type === "text_delta" && typeof event.delta.text === "string") {
-      state.streamed.add(`${state.messageId}:${event.index}`);
+      const key = `${state.messageId}:${event.index}`;
+      state.streamed.set(key, (state.streamed.get(key) ?? "") + event.delta.text);
       return [{ kind: "text_delta", text: event.delta.text }];
     }
     return [];
@@ -100,8 +123,18 @@ function translateLine(raw: string, state: { messageId: string; streamed: Set<st
     for (const [index, block] of content.entries()) {
       if (!isObject(block)) continue;
       if (block.type === "text" && typeof block.text === "string") {
-        if (!parsed.parent_tool_use_id && !state.streamed.has(`${parsed.message.id ?? ""}:${index}`)) {
-          events.push({ kind: "text_delta", text: block.text });
+        if (!parsed.parent_tool_use_id) {
+          // Current Claude emits one assistant envelope per non-empty block,
+          // before content_block_stop. Its singleton content array starts at
+          // zero even when the API block index follows thinking/tool blocks.
+          // Retain support for older/full-message multi-block envelopes too.
+          const messageId = parsed.message.id ?? "";
+          const blockIndex = content.length === 1 && messageId === state.messageId
+            ? (state.activeBlockIndex ?? index)
+            : index;
+          const streamed = state.streamed.get(`${messageId}:${blockIndex}`) ?? "";
+          const text = block.text.startsWith(streamed) ? block.text.slice(streamed.length) : block.text;
+          if (text) events.push({ kind: "text_delta", text });
         }
       } else if (
         block.type === "tool_use" &&
@@ -142,7 +175,7 @@ function translateLine(raw: string, state: { messageId: string; streamed: Set<st
     return events;
   }
 
-  if (type === "result") {
+  if (type === "result" || (type === undefined && typeof parsed.session_id === "string" && typeof parsed.result === "string")) {
     const resultText = typeof parsed.result === "string" ? parsed.result : "";
     if (parsed.is_error === true || (typeof parsed.subtype === "string" && parsed.subtype.startsWith("error"))) {
       const errors = Array.isArray(parsed.errors) ? parsed.errors.filter(e => typeof e === "string").join("; ") : "";

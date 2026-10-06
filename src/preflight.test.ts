@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  claudePluginPaths,
   enableInProject,
   extractRepo,
   isCached,
@@ -183,5 +184,52 @@ describe("isEnabledInProject / enableInProject", () => {
     enableInProject("foo@bar", tempRoot);
     const after = readJSON(join(tempRoot, ".claude", "settings.json"), {});
     expect(after).toEqual(before);
+  });
+});
+
+describe("Claude plugin configuration directory", () => {
+  test("plugin paths support explicit isolated homes and configuration roots", () => {
+    const home = join(tempRoot, "home");
+    const configDir = join(tempRoot, "custom-config");
+    expect(claudePluginPaths(home, {})).toEqual({
+      pluginsDir: join(home, ".claude", "plugins"),
+      installedPluginsFile: join(home, ".claude", "plugins", "installed_plugins.json"),
+      knownMarketplacesFile: join(home, ".claude", "plugins", "known_marketplaces.json"),
+    });
+    expect(claudePluginPaths(home, { CLAUDE_CONFIG_DIR: "" })).toEqual(claudePluginPaths(home, {}));
+    expect(claudePluginPaths(home, { CLAUDE_CONFIG_DIR: configDir })).toEqual({
+      pluginsDir: join(configDir, "plugins"),
+      installedPluginsFile: join(configDir, "plugins", "installed_plugins.json"),
+      knownMarketplacesFile: join(configDir, "plugins", "known_marketplaces.json"),
+    });
+  });
+
+  test("default cache lookup uses the current environment rather than an import-time root", () => {
+    const configDirs = [join(tempRoot, "config-one"), join(tempRoot, "config-two")];
+    for (const [index, configDir] of configDirs.entries()) {
+      const installPath = join(configDir, "plugins", "cache", `plugin-${index}`);
+      mkdirSync(installPath, { recursive: true });
+      writeJSON(join(configDir, "plugins", "installed_plugins.json"), {
+        version: 2,
+        plugins: { [`plugin-${index}@test`]: [{ installPath }] },
+      });
+    }
+    const script = `
+      const { isCached } = await import(${JSON.stringify(new URL("./preflight.ts", import.meta.url).href)});
+      const found = [];
+      for (const [index, configDir] of ${JSON.stringify(configDirs)}.entries()) {
+        process.env.CLAUDE_CONFIG_DIR = configDir;
+        found.push(isCached("plugin-" + index + "@test"));
+        found.push(isCached("plugin-" + (1 - index) + "@test"));
+      }
+      console.log(JSON.stringify(found));
+    `;
+    const child = Bun.spawnSync([process.execPath, "-e", script], {
+      env: { ...process.env, CLAUDE_CONFIG_DIR: join(tempRoot, "import-time-config") },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(child.exitCode).toBe(0);
+    expect(JSON.parse(child.stdout.toString())).toEqual([true, false, true, false]);
   });
 });
