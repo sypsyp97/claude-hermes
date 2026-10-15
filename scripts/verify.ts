@@ -154,6 +154,7 @@ async function main() {
     const result = await runStep(step);
     results.push(result);
     if (!args.jsonOnly) process.stderr.write(human(result) + "\n");
+    if (!result.ok && result.stderr) process.stderr.write(result.stderr);
     if (!result.ok) allOk = false;
   }
 
