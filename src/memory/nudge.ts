@@ -9,6 +9,7 @@ import { appendCrossSessionMemory } from "./files";
 import { createHash } from "node:crypto";
 import { getSharedDb } from "../state/shared-db";
 import { insertMemory } from "../state/repos/memory";
+import { getById, getByKey, sessionGeneration } from "../state/repos/sessions";
 import type { MemoryScope } from "../policy/channel";
 
 export interface TranscriptTurn {
@@ -42,6 +43,8 @@ export interface NudgeOptions {
   cwd?: string;
   channelId?: string;
   sourceSessionId?: number;
+  sourceSessionKey?: string;
+  generation?: number;
   memoryScope?: MemoryScope;
 }
 
@@ -50,29 +53,45 @@ export async function nudgeAndPersist(
   opts: NudgeOptions = {}
 ): Promise<ExtractedFact[]> {
   if (opts.memoryScope === "none") return [];
+  const db = opts.sourceSessionId === undefined ? undefined : await getSharedDb(opts.cwd);
+  const source = db
+    ?.transaction(() => {
+      const row = getById(db, opts.sourceSessionId!);
+      return row && { key: row.key, generation: sessionGeneration(db, row.key) };
+    })
+    .immediate();
+  // Resolve attribution before awaiting extraction; deleted sources never become shared memory.
+  if (db && (!source || (opts.sourceSessionKey !== undefined && source.key !== opts.sourceSessionKey)))
+    return [];
+  const key = source?.key;
+  const generation = opts.generation ?? source?.generation;
   const facts = (await extractFacts(turns))
     .filter((fact) => fact.key.trim() && fact.value.trim())
     .slice(0, 8)
     .map((fact) => ({ ...fact, key: fact.key.slice(0, 80), value: fact.value.slice(0, 2000) }));
   if (opts.sourceSessionId !== undefined) {
-    const db = await getSharedDb(opts.cwd);
-    db.transaction(() => {
-      for (const fact of facts) {
-        // Free-form notes are independent; named fields retain replacement semantics.
-        const key =
-          fact.key === "note"
-            ? `note:${createHash("sha256").update(fact.value).digest("hex").slice(0, 16)}`
-            : fact.key;
-        const latest = db
-          .query<{ value: string }, [number, string, string]>(
-            "SELECT value FROM memory_entries WHERE source_session_id = ? AND scope = ? AND key = ? ORDER BY id DESC LIMIT 1"
-          )
-          .get(opts.sourceSessionId!, fact.scope, key);
-        if (latest?.value !== fact.value)
-          insertMemory(db, { ...fact, key, sourceSessionId: opts.sourceSessionId });
-      }
-    })();
-    return facts;
+    const persisted = db!
+      .transaction(() => {
+        if (getByKey(db!, key!)?.id !== opts.sourceSessionId || sessionGeneration(db!, key!) !== generation)
+          return false;
+        for (const fact of facts) {
+          // Free-form notes are independent; named fields retain replacement semantics.
+          const key =
+            fact.key === "note"
+              ? `note:${createHash("sha256").update(fact.value).digest("hex").slice(0, 16)}`
+              : fact.key;
+          const latest = db!
+            .query<{ value: string }, [number, string, string]>(
+              "SELECT value FROM memory_entries WHERE source_session_id = ? AND scope = ? AND key = ? ORDER BY id DESC LIMIT 1"
+            )
+            .get(opts.sourceSessionId!, fact.scope, key);
+          if (latest?.value !== fact.value)
+            insertMemory(db!, { ...fact, key, sourceSessionId: opts.sourceSessionId });
+        }
+        return true;
+      })
+      .immediate();
+    return persisted ? facts : [];
   }
   for (const fact of facts) {
     const body = `- (${fact.scope}:${fact.key}) ${fact.value}`;

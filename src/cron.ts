@@ -90,13 +90,13 @@ function validateField(expr: string, spec: FieldSpec, field: string): void {
   }
 }
 
-function matchCronField(field: string, value: number): boolean {
+function matchCronField(field: string, value: number, min = 0): boolean {
   for (const part of field.split(",")) {
     const [range, stepStr] = part.split("/");
     const step = stepStr ? parseInt(stepStr) : 1;
 
     if (range === "*") {
-      if (value % step === 0) return true;
+      if ((value - min) % step === 0) return true;
       continue;
     }
 
@@ -109,6 +109,14 @@ function matchCronField(field: string, value: number): boolean {
     if (parseInt(range) === value) return true;
   }
   return false;
+}
+
+function matchDays(fields: CronFields, dayOfMonth: boolean, dayOfWeek: boolean): boolean {
+  // Cronie/Vixie cron records STAR from the field's first character, including
+  // stepped wildcards. Two restricted day fields combine with OR.
+  return fields.dayOfMonth.startsWith("*") || fields.dayOfWeek.startsWith("*")
+    ? dayOfMonth && dayOfWeek
+    : dayOfMonth || dayOfWeek;
 }
 
 /**
@@ -138,9 +146,12 @@ export function cronMatches(
   return (
     matchCronField(fields.minute, d.minute) &&
     matchCronField(fields.hour, d.hour) &&
-    matchCronField(fields.dayOfMonth, d.dayOfMonth) &&
-    matchCronField(fields.month, d.month) &&
-    matchCronField(fields.dayOfWeek, d.dayOfWeek)
+    matchCronField(fields.month, d.month, 1) &&
+    matchDays(
+      fields,
+      matchCronField(fields.dayOfMonth, d.dayOfMonth, 1),
+      matchCronField(fields.dayOfWeek, d.dayOfWeek),
+    )
   );
 }
 
@@ -149,7 +160,7 @@ function compileMatcher(fields: CronFields, timezoneOffsetMinutes: number): (dat
   const allowed = FIELDS.map((spec) => {
     const values = new Set<number>();
     for (let n = spec.min; n <= spec.max; n++) {
-      if (matchCronField(fields[spec.name], n)) values.add(n);
+      if (matchCronField(fields[spec.name], n, spec.min)) values.add(n);
     }
     return values;
   });
@@ -157,9 +168,8 @@ function compileMatcher(fields: CronFields, timezoneOffsetMinutes: number): (dat
     const shifted = shiftDateToOffset(date, timezoneOffsetMinutes);
     return allowed[0].has(shifted.getUTCMinutes()) &&
       allowed[1].has(shifted.getUTCHours()) &&
-      allowed[2].has(shifted.getUTCDate()) &&
       allowed[3].has(shifted.getUTCMonth() + 1) &&
-      allowed[4].has(shifted.getUTCDay());
+      matchDays(fields, allowed[2].has(shifted.getUTCDate()), allowed[4].has(shifted.getUTCDay()));
   };
 }
 
@@ -189,7 +199,7 @@ export function nextCronMatch(
 /**
  * Every minute in (from, to] that matches `expr`. Used by the scheduler to
  * catch up on minutes missed across a clock jump, daemon sleep, or blocked
- * event loop. Capped at 24 hours of lookback to contain runaway clocks.
+ * event loop. Only the most recent 24 hours are scanned after a long pause.
  */
 export function matchesBetween(
   expr: string | CronFields,
@@ -209,11 +219,11 @@ export function matchesBetween(
     ? compileMatcher(fields, timezoneOffsetMinutes)
     : (date: Date) => cronMatches(fields, date, timezoneOffsetMinutes);
   const MAX_LOOKBACK_MIN = 24 * 60;
-  const d = new Date(from);
+  const d = new Date(Math.max(from.getTime(), to.getTime() - MAX_LOOKBACK_MIN * 60_000));
   d.setUTCSeconds(0, 0);
   d.setUTCMinutes(d.getUTCMinutes() + 1);
   const hits: Date[] = [];
-  for (let i = 0; i <= MAX_LOOKBACK_MIN; i++) {
+  for (let i = 0; i < MAX_LOOKBACK_MIN; i++) {
     if (d.getTime() > to.getTime()) break;
     if (matches(d)) hits.push(new Date(d));
     d.setUTCMinutes(d.getUTCMinutes() + 1);

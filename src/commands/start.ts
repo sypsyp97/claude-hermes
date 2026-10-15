@@ -910,6 +910,7 @@ export async function start(args: string[] = []) {
           now,
           currentSettings.timezoneOffsetMinutes,
         );
+        // Coalesce every missed trigger in the recent window into one run.
         if (hits.length === 0) continue;
         void dispatchScheduledJob(job, {
           resolvePrompt,

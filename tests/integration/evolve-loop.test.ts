@@ -31,17 +31,19 @@ function task(overrides: Partial<EvolveTask> = {}): EvolveTask {
 describe("evolveOnce — fake executor", () => {
   test("commits when exec + verify are green", async () => {
     let committed = false;
-    let statusCalls = 0;
+    let executed = false;
     const result = await evolveOnce(db, task({ id: "green-task", title: "green task" }), tempRoot, {
-      runExec: async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "", durationMs: 1 }),
+      runExec: async () => {
+        executed = true;
+        return { ok: true, exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+      },
       gate: {
         runVerify: async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "", durationMs: 1 }),
         runGit: async (_cwd, args) => {
           if (args[0] === "status") {
-            statusCalls++;
-            return statusCalls === 1
-              ? { ok: true, stdout: "", stderr: "" }
-              : { ok: true, stdout: " M src/foo.ts\0", stderr: "" };
+            return executed
+              ? { ok: true, stdout: " M src/foo.ts\0", stderr: "" }
+              : { ok: true, stdout: "", stderr: "" };
           }
           if (args[0] === "add") return { ok: true, stdout: "", stderr: "" };
           if (args[0] === "diff") return { ok: true, stdout: "src/foo.ts\n", stderr: "" };
@@ -63,10 +65,13 @@ describe("evolveOnce — fake executor", () => {
 
   test("reverts only the exec-touched paths when verify is red", async () => {
     const restoreCalls: string[][] = [];
-    let statusCalls = 0;
+    let executed = false;
 
     const result = await evolveOnce(db, task({ id: "red-task", title: "red task" }), tempRoot, {
-      runExec: async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "", durationMs: 1 }),
+      runExec: async () => {
+        executed = true;
+        return { ok: true, exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+      },
       gate: {
         runVerify: async () => ({
           ok: false,
@@ -77,9 +82,8 @@ describe("evolveOnce — fake executor", () => {
         }),
         runGit: async (_cwd, args) => {
           if (args[0] === "status") {
-            statusCalls++;
             // A clean baseline is required before execution.
-            if (statusCalls === 1) return { ok: true, stdout: "", stderr: "" };
+            if (!executed) return { ok: true, stdout: "", stderr: "" };
             // After exec: only the executor's edit is dirty.
             return {
               ok: true,
@@ -109,10 +113,13 @@ describe("evolveOnce — fake executor", () => {
   test("exec failure reverts only exec-touched paths and skips verify", async () => {
     let verifyCalled = false;
     const restoreCalls: string[][] = [];
-    let statusCalls = 0;
+    let executed = false;
 
     const result = await evolveOnce(db, task({ id: "exec-blows", title: "exec blows up" }), tempRoot, {
-      runExec: async () => ({ ok: false, exitCode: 7, stdout: "", stderr: "boom", durationMs: 1 }),
+      runExec: async () => {
+        executed = true;
+        return { ok: false, exitCode: 7, stdout: "", stderr: "boom", durationMs: 1 };
+      },
       gate: {
         runVerify: async () => {
           verifyCalled = true;
@@ -120,8 +127,7 @@ describe("evolveOnce — fake executor", () => {
         },
         runGit: async (_cwd, args) => {
           if (args[0] === "status") {
-            statusCalls++;
-            if (statusCalls === 1) return { ok: true, stdout: "", stderr: "" };
+            if (!executed) return { ok: true, stdout: "", stderr: "" };
             return { ok: true, stdout: "?? half-applied.ts\0", stderr: "" };
           }
           if (args[0] === "restore" || args[0] === "clean") restoreCalls.push(args);

@@ -11,6 +11,8 @@
  * GitHub-issue middleman. Tests inject fakes via `hooks`.
  */
 
+import { mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
+import { join } from "node:path";
 import type { Database } from "../state/db";
 import type { StatusSink } from "../status/sink";
 import { executeSelfEdit, type ExecuteOptions, type ExecuteResult } from "./executor";
@@ -30,7 +32,7 @@ export interface EvolveTask {
   body: string;
 }
 
-export type Outcome = "dirty-worktree" | "exec-failed" | "verify-failed" | "committed";
+export type Outcome = "dirty-worktree" | "workspace-busy" | "exec-failed" | "verify-failed" | "committed";
 
 export interface EvolveIterationResult {
   outcome: Outcome;
@@ -68,64 +70,101 @@ export async function evolveOnce(
     };
   }
 
-  await recordEvent(
-    db,
-    { kind: "evolve.plan", slot: task.id, summary: task.title },
-    cwd,
-  );
-
-  const prompt = (hooks.buildPrompt ?? defaultPrompt)(task);
-  const execOpts: ExecuteOptions = { prompt, cwd, taskId: task.id, taskLabel: task.title };
-  if (hooks.sink) execOpts.sink = hooks.sink;
-  const exec = await (hooks.runExec ?? executeSelfEdit)(execOpts);
-
-  await recordEvent(
-    db,
-    {
-      kind: "evolve.exec.done",
-      slot: task.id,
-      summary: exec.ok ? "subagent finished green" : "subagent exited non-zero",
-      details: { exitCode: exec.exitCode, durationMs: exec.durationMs },
-    },
-    cwd,
-  );
-
-  const touchedPaths = () => computeDirtyPaths(cwd, hooks.gate);
-
-  if (!exec.ok) {
-    await revertPaths(cwd, await touchedPaths(), hooks.gate);
-    return { outcome: "exec-failed", task, exec };
+  cwd = await realpath(cwd);
+  const lockPath = join(cwd, ".claude", "hermes", "evolve.lock");
+  await mkdir(join(cwd, ".claude", "hermes"), { recursive: true });
+  let owner = "unknown";
+  const lock = await open(lockPath, "wx").catch(async (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EEXIST") throw error;
+    owner = await readFile(lockPath, "utf8").catch(() => "unknown");
+    return null;
+  });
+  if (!lock) {
+    return {
+      outcome: "workspace-busy",
+      task,
+      reason: `Evolve workspace lock ${lockPath} is held by ${owner.trim()}. Stop all work from its owner before manually removing a stale lock.`,
+    };
   }
+  // Fail closed after a crash: a dead owner PID does not prove its editing
+  // descendants have stopped. Only this live holder releases its own lock.
+  try {
+    await lock.writeFile(JSON.stringify({ pid: process.pid }));
+    const currentDirtyPaths = await computeDirtyPaths(cwd, hooks.gate);
+    if (currentDirtyPaths.length > 0) {
+      return {
+        outcome: "dirty-worktree",
+        task,
+        reason: "The worktree changed before evolve acquired its lock. Commit or stash those changes first.",
+        dirtyPaths: currentDirtyPaths,
+      };
+    }
 
-  const verify = await runVerify(cwd, hooks.gate);
-  if (!verify.ok) {
-    await revertPaths(cwd, await touchedPaths(), hooks.gate);
+    await recordEvent(
+      db,
+      { kind: "evolve.plan", slot: task.id, summary: task.title },
+      cwd,
+    );
+
+    const prompt = (hooks.buildPrompt ?? defaultPrompt)(task);
+    const execOpts: ExecuteOptions = { prompt, cwd, taskId: task.id, taskLabel: task.title };
+    if (hooks.sink) execOpts.sink = hooks.sink;
+    const exec = await (hooks.runExec ?? executeSelfEdit)(execOpts);
+
     await recordEvent(
       db,
       {
-        kind: "evolve.revert",
+        kind: "evolve.exec.done",
         slot: task.id,
-        summary: `verify failed (exit ${verify.exitCode})`,
-        details: { stderrTail: verify.stderr.slice(-1024) },
+        summary: exec.ok ? "subagent finished green" : "subagent exited non-zero",
+        details: { exitCode: exec.exitCode, durationMs: exec.durationMs },
       },
       cwd,
     );
-    return { outcome: "verify-failed", task, verify, exec };
-  }
 
-  const message = (hooks.commitMessage ?? defaultCommitMessage)(task);
-  const sha = await commitChanges(cwd, message, await touchedPaths(), hooks.gate);
-  await recordEvent(
-    db,
-    {
-      kind: "evolve.commit",
-      slot: task.id,
-      summary: sha ? `committed as ${sha.slice(0, 10)}` : "no changes to commit",
-      details: { sha, durationMs: verify.durationMs },
-    },
-    cwd,
-  );
-  return { outcome: "committed", task, sha, verify, exec };
+    const touchedPaths = () => computeDirtyPaths(cwd, hooks.gate);
+
+    if (!exec.ok) {
+      await revertPaths(cwd, await touchedPaths(), hooks.gate);
+      return { outcome: "exec-failed", task, exec };
+    }
+
+    const verify = await runVerify(cwd, hooks.gate);
+    if (!verify.ok) {
+      await revertPaths(cwd, await touchedPaths(), hooks.gate);
+      await recordEvent(
+        db,
+        {
+          kind: "evolve.revert",
+          slot: task.id,
+          summary: `verify failed (exit ${verify.exitCode})`,
+          details: { stderrTail: verify.stderr.slice(-1024) },
+        },
+        cwd,
+      );
+      return { outcome: "verify-failed", task, verify, exec };
+    }
+
+    const message = (hooks.commitMessage ?? defaultCommitMessage)(task);
+    const sha = await commitChanges(cwd, message, await touchedPaths(), hooks.gate);
+    await recordEvent(
+      db,
+      {
+        kind: "evolve.commit",
+        slot: task.id,
+        summary: sha ? `committed as ${sha.slice(0, 10)}` : "no changes to commit",
+        details: { sha, durationMs: verify.durationMs },
+      },
+      cwd,
+    );
+    return { outcome: "committed", task, sha, verify, exec };
+  } finally {
+    try {
+      await lock.close();
+    } finally {
+      await unlink(lockPath);
+    }
+  }
 }
 
 function defaultPrompt(task: EvolveTask): string {

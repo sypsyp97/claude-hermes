@@ -7,9 +7,11 @@ import { threadKey, workspaceKey } from "../router/session-key";
 import { getSharedDb } from "../state/shared-db";
 import {
   bumpTurn,
+  deleteByKey,
   getByKey,
   markCompactWarned,
   replaceSession,
+  resetByKey,
   touchLastUsed,
 } from "../state/repos/sessions";
 import * as workspaceSessions from "../sessions";
@@ -84,7 +86,7 @@ export function sessionAccess(input: SessionInput | undefined, source: ThreadSou
           : workspaceSessions.incrementTurn();
       const db = await getSharedDb(target.workspace);
       const row = getByKey(db, target.key);
-      if (!row) return 0;
+      if (!row?.claude_session_id) return 0;
       bumpTurn(db, row.id);
       return row.turn_count + 1;
     },
@@ -95,16 +97,14 @@ export function sessionAccess(input: SessionInput | undefined, source: ThreadSou
           : workspaceSessions.markCompactWarned();
       const db = await getSharedDb(target.workspace);
       const row = getByKey(db, target.key);
-      if (row) markCompactWarned(db, row.id);
+      if (row?.claude_session_id) markCompactWarned(db, row.id);
     },
     async reset() {
       if (!scoped)
         return thread ? threadSessions.removeThreadSession(source, thread) : workspaceSessions.resetSession();
       // A fresh Claude context keeps attributed long-term memory searchable.
       const db = await getSharedDb(target.workspace);
-      db.prepare(
-        "UPDATE sessions SET claude_session_id = NULL, turn_count = 0, compact_warned = 0 WHERE key = ?"
-      ).run(target.key);
+      resetByKey(db, target.key);
     },
     async forget() {
       if (!scoped) throw new Error("Forgetting memory requires an explicit conversation target.");
@@ -115,8 +115,8 @@ export function sessionAccess(input: SessionInput | undefined, source: ThreadSou
       db.transaction(() => {
         const row = getByKey(db, target.key);
         if (row) db.prepare("DELETE FROM memory_entries WHERE source_session_id = ?").run(row.id);
-        db.prepare("DELETE FROM sessions WHERE key = ?").run(target.key);
-      })();
+        deleteByKey(db, target.key);
+      }).immediate();
       if (target.thread) await threadSessions.forgetLegacyThread(target.thread, target.workspace);
     },
   };

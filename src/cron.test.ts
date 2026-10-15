@@ -294,3 +294,115 @@ test("compiled scan membership matches individual evaluation over offset calenda
     }
   }
 });
+
+describe("cron calendar field semantics", () => {
+  // Cronie treats * as the field's full range, whose lower bound is 1 here.
+  for (const [field, wildcard, range, count] of [
+    ["month", "0 0 1 */2 *", "0 0 1 1-12/2 *", 12],
+    ["day of month", "0 0 */2 * *", "0 0 1-31/2 * *", 31],
+  ] as const) {
+    test(`${field} wildcard steps originate at 1, like an explicit range`, () => {
+      for (let value = 1; value <= count; value++) {
+        const date =
+          field === "month" ? new Date(Date.UTC(2026, value - 1, 1)) : new Date(Date.UTC(2026, 4, value));
+        expect(cronMatches(range, date)).toBe(value % 2 === 1);
+        expect(cronMatches(wildcard, date)).toBe(value % 2 === 1);
+      }
+    });
+  }
+
+  // The STAR flag follows the first character, including */n and lists.
+  // A full numeric range has no STAR flag; restricted DOM/DOW use OR.
+  const cases = [
+    ["0 0 1 * 1", "2026-04-13T00:00:00Z", true],
+    ["0 0 1 * 1", "2026-04-01T00:00:00Z", true],
+    ["0 0 1 * 1", "2026-04-14T00:00:00Z", false],
+    ["0 0 1 5 1", "2026-04-13T00:00:00Z", false],
+    ["1 0 1 * 1", "2026-04-13T00:00:00Z", false],
+    ["0 1 1 * 1", "2026-04-13T00:00:00Z", false],
+    ["0 0 * * 1", "2026-05-03T00:00:00Z", false],
+    ["0 0 1 * *", "2026-05-04T00:00:00Z", false],
+    ["0 0 */2 * 1", "2026-05-04T00:00:00Z", false],
+    ["0 0 */2 * 1", "2026-05-11T00:00:00Z", true],
+    ["0 0 */2 * 1", "2026-05-03T00:00:00Z", false],
+    ["0 0 1 * */2", "2026-05-01T00:00:00Z", false],
+    ["0 0 1 * */2", "2026-09-01T00:00:00Z", true],
+    ["0 0 1 * */2", "2026-09-03T00:00:00Z", false],
+    ["0 0 1-31 * 1", "2026-05-05T00:00:00Z", true],
+    ["0 0 1,*/2 * 1", "2026-05-04T00:00:00Z", true],
+    ["0 0 1,*/2 * 1", "2026-05-03T00:00:00Z", true],
+    ["0 0 */2,2 * 1", "2026-05-03T00:00:00Z", false],
+    ["0 0 */2,2 * 1", "2026-05-04T00:00:00Z", false],
+    ["0 0 1 * 1,*/2", "2026-05-04T00:00:00Z", true],
+    ["0 0 1 * 1,*/2", "2026-05-05T00:00:00Z", true],
+    ["0 0 1 * */2,1", "2026-05-04T00:00:00Z", false],
+    ["0 0 1 * */2,1", "2026-06-01T00:00:00Z", true],
+    ["0 0 */2 * *", "2026-05-01T00:00:00Z", true],
+    ["0 0 1 */2 *", "2026-03-01T00:00:00Z", true],
+  ] as const;
+
+  for (const [expr, localTime, expected] of cases) {
+    test(`${expr} at ${localTime} is ${expected} across all matching paths`, () => {
+      for (const offset of [-330, 0, 345]) {
+        const date = new Date(Date.parse(localTime) - offset * 60_000);
+        const fields = parseCron(expr);
+        for (const input of [expr, fields]) {
+          const next = nextCronMatch(input, new Date(+date - 60_000), offset);
+          expect({
+            direct: cronMatches(input, date, offset),
+            shortScan: matchesBetween(input, new Date(+date - 60_000), date, offset).map(Number),
+            compiledScan: matchesBetween(input, new Date(+date - 20 * 60_000), date, offset).map(Number),
+            nextIsCandidate: next?.getTime() === +date,
+          }).toEqual({
+            direct: expected,
+            shortScan: expected ? [+date] : [],
+            compiledScan: expected ? [+date] : [],
+            nextIsCandidate: expected,
+          });
+        }
+      }
+    });
+  }
+});
+
+describe("matchesBetween newest 24-hour catch-up window", () => {
+  // start.ts dispatches once when hits.length > 0, coalescing missed slots.
+  // These tests pin the slots without starting a daemon or external services.
+  for (const from of ["2026-04-15T10:00:00Z", "2026-04-15T09:59:00Z", "2025-04-16T10:00:00Z"]) {
+    for (const to of ["2026-04-16T10:00:00Z", "2026-04-16T10:00:30Z"]) {
+      test(`returns at most 1440 newest slots in (${from}, ${to}]`, () => {
+        const hits = matchesBetween("* * * * *", new Date(from), new Date(to));
+        expect(hits).toHaveLength(1440);
+        expect(hits[0].toISOString()).toBe("2026-04-15T10:01:00.000Z");
+        expect(hits.at(-1)?.toISOString()).toBe("2026-04-16T10:00:00.000Z");
+        expect(new Set(hits.map(Number)).size).toBe(hits.length);
+      });
+    }
+  }
+
+  test("excludes from and includes to only at complete minute boundaries", () => {
+    const expr = "* * * * *";
+    const iso = (from: string, to: string) => matchesBetween(expr, new Date(from), new Date(to)).map(Number);
+    const start = Date.parse("2026-04-16T10:00:00Z");
+    expect(iso("2026-04-16T10:00:00Z", "2026-04-16T10:01:00Z")).toEqual([start + 60_000]);
+    expect(iso("2026-04-16T10:00:30Z", "2026-04-16T10:01:00Z")).toEqual([start + 60_000]);
+    expect(iso("2026-04-16T10:00:00Z", "2026-04-16T10:00:59.999Z")).toEqual([]);
+    expect(iso("2026-04-16T09:59:59.999Z", "2026-04-16T10:00:00Z")).toEqual([start]);
+    expect(iso("2026-04-16T10:01:00Z", "2026-04-16T10:00:00Z")).toEqual([]);
+  });
+
+  for (const [offset, expected] of [
+    [345, "2026-04-15T18:15:00.000Z"],
+    [-330, "2026-04-15T05:30:00.000Z"],
+  ] as const) {
+    test(`keeps UTC window bounds while matching local midnight at offset ${offset}`, () => {
+      const hits = matchesBetween(
+        "0 0 * * *",
+        new Date("2026-04-13T00:00:00Z"),
+        new Date("2026-04-16T00:00:00Z"),
+        offset
+      );
+      expect(hits.map((date) => date.toISOString())).toEqual([expected]);
+    });
+  }
+});

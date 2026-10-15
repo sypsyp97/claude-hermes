@@ -15,7 +15,10 @@ import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-const SEMVER = /^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
+// SemVer 2.0: numeric identifiers cannot have leading zeroes; build metadata
+// is valid but does not affect precedence.
+const SEMVER =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
 const ROOT = process.cwd();
 
 const MANIFESTS: ReadonlyArray<{ path: string; selector: string }> = [
@@ -65,12 +68,27 @@ function writeVersion(json: JsonRecord, selector: string, value: string): void {
 }
 
 function cmpSemver(a: string, b: string): number {
-  const pa = a.split("-")[0].split(".").map(Number);
-  const pb = b.split("-")[0].split(".").map(Number);
-  for (let i = 0; i < 3; i++) {
-    if (pa[i] !== pb[i]) return pa[i] - pb[i];
+  const left = SEMVER.exec(a)!;
+  const right = SEMVER.exec(b)!;
+  for (let i = 1; i <= 3; i++) {
+    const x = BigInt(left[i]);
+    const y = BigInt(right[i]);
+    if (x !== y) return x < y ? -1 : 1;
   }
-  return 0;
+  if (left[4] === undefined || right[4] === undefined) {
+    return left[4] === right[4] ? 0 : left[4] === undefined ? 1 : -1;
+  }
+  const x = left[4].split(".");
+  const y = right[4].split(".");
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    if (x[i] === y[i]) continue;
+    const xn = /^\d+$/.test(x[i]);
+    const yn = /^\d+$/.test(y[i]);
+    if (xn && yn) return BigInt(x[i]) < BigInt(y[i]) ? -1 : 1;
+    if (xn !== yn) return xn ? -1 : 1;
+    return x[i] < y[i] ? -1 : 1;
+  }
+  return x.length - y.length;
 }
 
 function flag(name: string, args: string[]): string | true | undefined {
@@ -114,6 +132,7 @@ async function main(): Promise<void> {
     die(`versions diverge across manifests:\n${files.map((f) => `  ${f.path} = ${f.current}`).join("\n")}`);
   }
   const [current] = [...unique];
+  if (!SEMVER.test(current)) die(`not a valid current semver: ${current}`);
   if (cmpSemver(version, current) <= 0) {
     die(`new version ${version} is not higher than current ${current}`);
   }

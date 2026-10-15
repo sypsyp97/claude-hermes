@@ -37,7 +37,7 @@ interface StepDef {
 const STEPS: StepDef[] = [
   { name: "typecheck", command: "bun", args: ["x", "tsc", "--noEmit"] },
   { name: "lint", command: "bun", args: ["x", "@biomejs/biome", "check", "src", "tests", "scripts"] },
-  { name: "unit", command: "bun", args: ["test", "src"] },
+  { name: "unit", command: "bun", args: ["test", "src", "scripts/verify.test.ts"] },
   { name: "smoke", command: "bun", args: ["test", "tests/smoke"] },
   { name: "integration", command: "bun", args: ["test", "tests/integration"] },
 ];

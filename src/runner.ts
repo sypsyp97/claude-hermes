@@ -1,4 +1,5 @@
 import { withActiveConversation, conversationPreference } from "./runtime/conversation-controls";
+import { leaseGeneration, withSessionLease } from "./runtime/session-lease";
 import { artifactDirectory } from "./runtime/artifacts";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { join } from "path";
@@ -29,7 +30,14 @@ import { nudgeAndPersist } from "./memory/nudge";
 import type { MemoryScope } from "./policy/channel";
 import { readAllBlocks } from "./memory/blocks";
 import { getSharedDb } from "./state/shared-db";
-import { upsertSession, type SessionRow } from "./state/repos/sessions";
+import {
+  bumpTurn,
+  markCompactWarned,
+  sessionGeneration,
+  setClaudeSessionId,
+  upsertSession,
+  type SessionRow,
+} from "./state/repos/sessions";
 import { appendMessage } from "./state/repos/messages";
 import { captureCandidateSkill } from "./learning/completion-hook";
 import { createToolCollector } from "./learning/tool-collector";
@@ -94,7 +102,6 @@ const threadQueues = new Map<string, { tail: Promise<unknown>; target: SessionTa
  * a row, and a returning session simply bumps last_used_at.
  */
 async function persistTurn(opts: {
-  cwd: string;
   key: string;
   source: string;
   scope: string;
@@ -108,21 +115,25 @@ async function persistTurn(opts: {
   assistantReply: string;
   userText?: string;
   memoryScope?: MemoryScope;
-}): Promise<void> {
+  generation: number;
+  isNew: boolean;
+}): Promise<{ turnCount: number; warn: boolean } | null> {
   try {
-    const db = await getSharedDb(opts.cwd);
-    const sessionRow = upsertSession(db, {
-      key: opts.key,
-      scope: opts.scope,
-      source: opts.source,
-      workspace: opts.workspace,
-      thread: opts.thread ?? null,
-      guild: opts.guild,
-      channel: opts.channel,
-      user: opts.user,
-      claudeSessionId: opts.claudeSessionId,
-    });
-    db.transaction(() => {
+    const db = await getSharedDb(opts.workspace);
+    const completed = db.transaction(() => {
+      if (sessionGeneration(db, opts.key) !== opts.generation) return null;
+      const sessionRow = upsertSession(db, {
+        key: opts.key,
+        scope: opts.scope,
+        source: opts.source,
+        workspace: opts.workspace,
+        thread: opts.thread ?? null,
+        guild: opts.guild,
+        channel: opts.channel,
+        user: opts.user,
+        claudeSessionId: opts.claudeSessionId,
+      });
+      setClaudeSessionId(db, sessionRow.id, opts.claudeSessionId);
       appendMessage(db, {
         sessionId: sessionRow.id,
         role: "user",
@@ -133,13 +144,29 @@ async function persistTurn(opts: {
         role: "assistant",
         content: opts.assistantReply,
       });
-    })();
-    if (opts.userText) await nudgeAndPersist([{role:"user", content:opts.userText}], {
-      cwd: opts.cwd, sourceSessionId: sessionRow.id, memoryScope: opts.memoryScope,
+      const turnCount = sessionRow.turn_count + (opts.isNew ? 0 : 1);
+      if (!opts.isNew) bumpTurn(db, sessionRow.id);
+      const warn = !opts.isNew && turnCount >= COMPACT_WARN_THRESHOLD && sessionRow.compact_warned === 0;
+      if (warn) markCompactWarned(db, sessionRow.id);
+      return { sessionRow, turnCount, warn };
+    }).immediate();
+    if (!completed) return null;
+    if (opts.userText) await nudgeAndPersist([{ role: "user", content: opts.userText }], {
+      cwd: opts.workspace,
+      sourceSessionId: completed.sessionRow.id,
+      memoryScope: opts.memoryScope,
+      sourceSessionKey: opts.key,
+      generation: opts.generation,
     });
+    return completed;
   } catch (e) {
     console.error(`[${new Date().toLocaleTimeString()}] Failed to persist turn to messages store:`, e);
+    return null;
   }
+}
+
+function withOwnedConversation<T>(target: SessionTarget, work: () => Promise<T>): Promise<T> {
+  return withActiveConversation(target, () => withSessionLease(target, work));
 }
 
 function enqueue<T>(fn: () => Promise<T>, threadId?: SessionInput, source: ThreadSource = "cli"): Promise<T> {
@@ -575,7 +602,7 @@ export async function deleteThreadSession(source: ThreadSource, threadId: string
 }
 
 export function compactCurrentSession(opts?: { sink?: StatusSink; target?: SessionInput; source?: ThreadSource }): Promise<{ success: boolean; message: string }> {
-  return enqueue(() => withActiveConversation(sessionAccess(opts?.target, opts?.source).target, () => compactSession(opts)), opts?.target, opts?.source);
+  return enqueue(() => withOwnedConversation(sessionAccess(opts?.target, opts?.source).target, () => compactSession(opts)), opts?.target, opts?.source);
 }
 
 async function compactSession(
@@ -639,6 +666,7 @@ async function execClaude(
   await mkdir(logs, { recursive: true });
 
   const session = sessionAccess(input, source);
+  const generation = leaseGeneration()!;
   const threadId = session.target.thread;
   const existing = await session.get();
   const isNew = !existing;
@@ -831,8 +859,6 @@ async function execClaude(
     const returnedSessionId = exec.sessionId ?? extractedFromRaw.sessionId;
     if (isNew && returnedSessionId) {
       sessionId = returnedSessionId;
-      await session.create(sessionId);
-      console.log(`[${new Date().toLocaleTimeString()}] Session created: ${sessionId} (${session.target.key})`);
     }
   }
 
@@ -853,17 +879,21 @@ async function execClaude(
   // `workspace:<hash>` for the workspace lane. Pre-fix, the runner wrote
   // shadow rows under `<source>:<thread>` / bare `sessionId`, which never
   // joined to the live session-manager rows.
+  let persisted: { turnCount: number; warn: boolean } | null = null;
   if (exitCode === 0 && !rateLimitMessage && sessionId && sessionId !== "unknown") {
-    await persistTurn({
+    persisted = await persistTurn({
       ...session.target,
-      cwd: process.cwd(),
       claudeSessionId: sessionId,
       userPrompt: prompt,
       assistantReply: stdout,
       userText,
+      generation,
+      isNew,
     });
 
-    if (settings.learning?.captureCandidateSkills) {
+    if (persisted && isNew)
+      console.log(`[${new Date().toLocaleTimeString()}] Session created: ${sessionId} (${session.target.key})`);
+    if (persisted && settings.learning?.captureCandidateSkills) {
       void (async () => {
         try {
           await captureCandidateSkill(
@@ -911,12 +941,12 @@ async function execClaude(
   // the user decide whether to resume; automatic compact + replay is unsafe.
 
   // --- Turn tracking & compact warning ---
-  if (exitCode === 0 && !isNew) {
-    const turnCount = await session.increment();
+  if (persisted && !isNew) {
+    const turnCount = persisted.turnCount;
     console.log(`[${new Date().toLocaleTimeString()}] Turn count: ${turnCount}${threadId ? ` (thread ${threadId.slice(0, 8)})` : ""}`);
 
-    if (turnCount >= COMPACT_WARN_THRESHOLD && existing && !existing.compactWarned) {
-      await session.markWarned();
+    const db = await getSharedDb(session.target.workspace);
+    if (persisted.warn && sessionGeneration(db, session.target.key) === generation) {
       emitCompactEvent({ type: "warn", turnCount });
     }
   }
@@ -931,7 +961,7 @@ export async function run(
   sink?: StatusSink,
   source: ThreadSource = "cli",
 ): Promise<RunResult> {
-  return enqueue(() => withActiveConversation(sessionAccess(threadId, source).target, () => execClaude(name, prompt, threadId, sink, source)), threadId, source);
+  return enqueue(() => withOwnedConversation(sessionAccess(threadId, source).target, () => execClaude(name, prompt, threadId, sink, source)), threadId, source);
 }
 
 function prefixUserMessageWithClock(prompt: string): string {
@@ -954,7 +984,7 @@ export async function runUserMessage(
 ): Promise<RunResult> {
   const text = typeof prompt === "string" ? prompt : prompt.text;
   const context = typeof prompt === "string" ? prompt : prompt.context;
-  return enqueue(() => withActiveConversation(sessionAccess(threadId, source).target, () => execClaude(name, prefixUserMessageWithClock(context), threadId, sink, source, text)), threadId, source);
+  return enqueue(() => withOwnedConversation(sessionAccess(threadId, source).target, () => execClaude(name, prefixUserMessageWithClock(context), threadId, sink, source, text)), threadId, source);
 }
 
 /**
@@ -962,10 +992,11 @@ export async function runUserMessage(
  * session is created immediately. No-op if a session already exists.
  */
 export async function bootstrap(): Promise<void> {
-  const existing = await sessionAccess(undefined).get();
-  if (existing) return;
-
-  console.log(`[${new Date().toLocaleTimeString()}] Bootstrapping new session...`);
-  await execClaude("bootstrap", "Wakeup, my friend!");
-  console.log(`[${new Date().toLocaleTimeString()}] Bootstrap complete — session is live.`);
+  return enqueue(() => withOwnedConversation(sessionAccess(undefined).target, async () => {
+    const existing = await sessionAccess(undefined).get();
+    if (existing) return;
+    console.log(`[${new Date().toLocaleTimeString()}] Bootstrapping new session...`);
+    await execClaude("bootstrap", "Wakeup, my friend!");
+    console.log(`[${new Date().toLocaleTimeString()}] Bootstrap complete — session is live.`);
+  }));
 }

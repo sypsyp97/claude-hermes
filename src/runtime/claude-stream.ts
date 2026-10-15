@@ -15,6 +15,8 @@ import { spawn } from "node:child_process";
 import { claudeArgv } from "./claude-cli";
 import { bridgeSignal } from "./bridge-context";
 import { withExecutionSlot } from "./execution-budget";
+import { ProcessTreeCleanupError, taskProcessArgs, terminateProcessTree } from "./process-tree";
+import { registerLeaseProcess, releaseLeaseProcess } from "./session-lease";
 import type { StatusSink } from "../status/sink";
 import { createStreamParser, type StatusEvent } from "../status/stream";
 
@@ -57,7 +59,8 @@ export async function runClaudeStreaming(opts: StreamingOptions): Promise<Stream
     try {
       return await stream({ ...opts, signal });
     } catch (error) {
-      const stderr = signal?.aborted ? "Claude session cancelled" : String(error);
+      const cleanupFailed = error instanceof ProcessTreeCleanupError;
+      const stderr = cleanupFailed || !signal?.aborted ? String(error) : "Claude session cancelled";
       // Once admitted, an abort or synchronous spawn failure must finish an
       // opened sink, including its heartbeat, even if no child was created.
       try {
@@ -67,7 +70,7 @@ export async function runClaudeStreaming(opts: StreamingOptions): Promise<Stream
       }
       return {
         ok: false,
-        exitCode: signal?.aborted ? 130 : -1,
+        exitCode: signal?.aborted && !cleanupFailed ? 130 : -1,
         stdout: "",
         stderr,
         durationMs: Date.now() - started,
@@ -99,11 +102,18 @@ async function stream(opts: StreamingOptions): Promise<StreamingResult> {
 
   const started = Date.now();
   signal?.throwIfAborted();
-  return new Promise<StreamingResult>((resolveOuter) => {
-    const proc = spawn(bin, args, {
+  return new Promise<StreamingResult>((resolveOuter, rejectOuter) => {
+    const invocation = taskProcessArgs([bin, ...args]);
+    const proc = spawn(invocation.args[0], invocation.args.slice(1), {
       cwd: opts.cwd,
       env: opts.env ?? process.env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [invocation.leased ? "pipe" : "ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+      windowsHide: true,
+    });
+    const processExited = new Promise<void>((resolve) => {
+      proc.once("exit", () => resolve());
+      proc.once("error", () => resolve());
     });
 
     const parser = createStreamParser();
@@ -113,13 +123,14 @@ async function stream(opts: StreamingOptions): Promise<StreamingResult> {
     let finalResult: string | undefined;
     let errorShort: string | undefined;
 
-    let killTimer: ReturnType<typeof setTimeout> | null = null;
+    let termination: Promise<void> | undefined;
+    let launchPermission = Promise.resolve();
     let interruptedCode: number | undefined;
     let exited = false;
     const closeInterruptedPipes = () => {
       if (!exited || interruptedCode === undefined) return;
-      // Descendants may inherit these pipes after the direct CLI child exits.
-      // Cancellation must not wait for those unrelated handles to close.
+      // The leader may exit before descendants close their inherited pipes.
+      // Group cleanup is awaited separately before finalizing the result.
       proc.stdout?.destroy();
       proc.stderr?.destroy();
     };
@@ -128,15 +139,9 @@ async function stream(opts: StreamingOptions): Promise<StreamingResult> {
       interruptedCode = code;
       stderr += message;
       closeInterruptedPipes();
-      try {
-        proc.kill("SIGTERM");
-      } catch {}
-      killTimer = setTimeout(() => {
-        try {
-          proc.kill("SIGKILL");
-        } catch {}
-      }, killEscalationMs);
-      if (typeof killTimer.unref === "function") killTimer.unref();
+      termination = terminateProcessTree(proc, processExited, killEscalationMs);
+      // Attach a rejection handler immediately; finalization awaits the result.
+      void termination.catch(() => {});
     };
     const timer = setTimeout(
       () => interrupt(124, `Claude session timed out after ${timeoutMs / 1000}s`),
@@ -183,7 +188,9 @@ async function stream(opts: StreamingOptions): Promise<StreamingResult> {
       finalized = true;
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      if (killTimer) clearTimeout(killTimer);
+      await launchPermission;
+      await termination;
+      if (invocation.leased && proc.pid !== undefined) await releaseLeaseProcess(proc.pid);
       await pendingEvents;
       await handleEvents(parser.flush());
       if (processOk && interruptedCode === undefined && !errorShort && finalResult === undefined) {
@@ -221,11 +228,25 @@ async function stream(opts: StreamingOptions): Promise<StreamingResult> {
     });
     proc.on("close", (code) => {
       const exitCode = code ?? -1;
-      void finalize(exitCode, exitCode === 0);
+      void finalize(exitCode, exitCode === 0).catch(rejectOuter);
     });
     proc.on("error", (err) => {
       stderr += String(err);
-      void finalize(-1, false);
+      void finalize(-1, false).catch(rejectOuter);
     });
+    proc.stdin?.on("error", (error) => {
+      if (!finalized) interrupt(1, `Claude launch pipe failed: ${String(error)}`);
+    });
+    if (invocation.leased && proc.pid !== undefined) {
+      launchPermission = registerLeaseProcess(proc.pid)
+        .then(() => {
+          if (interruptedCode !== undefined) return;
+          signal?.throwIfAborted();
+          proc.stdin!.end("run\n");
+        })
+        .catch((error) => {
+          interrupt(signal?.aborted ? 130 : 1, `Claude launch rejected: ${String(error)}`);
+        });
+    }
   });
 }

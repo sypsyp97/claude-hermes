@@ -41,9 +41,12 @@ export interface NewSession {
  * lastUsedAt heartbeat on an existing one).
  */
 export function replaceSession(db: Database, input: NewSession): SessionRow {
-  const now = new Date().toISOString();
-  db.prepare(
-    `INSERT INTO sessions (key, scope, source, workspace, guild, channel, thread, user, claude_session_id, created_at, last_used_at, turn_count, compact_warned)
+  return db
+    .transaction(() => {
+      invalidateSession(db, input.key);
+      const now = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO sessions (key, scope, source, workspace, guild, channel, thread, user, claude_session_id, created_at, last_used_at, turn_count, compact_warned)
      VALUES ($key, $scope, $source, $workspace, $guild, $channel, $thread, $user, $claude, $now, $now, 0, 0)
      ON CONFLICT(key) DO UPDATE SET
        scope = $scope,
@@ -58,19 +61,46 @@ export function replaceSession(db: Database, input: NewSession): SessionRow {
        last_used_at = $now,
        turn_count = 0,
        compact_warned = 0`
-  ).run({
-    $key: input.key,
-    $scope: input.scope,
-    $source: input.source,
-    $workspace: input.workspace,
-    $guild: input.guild ?? null,
-    $channel: input.channel ?? null,
-    $thread: input.thread ?? null,
-    $user: input.user ?? null,
-    $claude: input.claudeSessionId ?? null,
-    $now: now,
-  });
-  return getByKey(db, input.key)!;
+      ).run({
+        $key: input.key,
+        $scope: input.scope,
+        $source: input.source,
+        $workspace: input.workspace,
+        $guild: input.guild ?? null,
+        $channel: input.channel ?? null,
+        $thread: input.thread ?? null,
+        $user: input.user ?? null,
+        $claude: input.claudeSessionId ?? null,
+        $now: now,
+      });
+      return getByKey(db, input.key)!;
+    })
+    .immediate();
+}
+
+/** Independent of sessions: even an in-flight first turn can be invalidated. */
+export function sessionGeneration(db: Database, key: string): number {
+  return (
+    db
+      .query<{ generation: number }, [string]>("SELECT generation FROM session_runtime WHERE key = ?")
+      .get(key)?.generation ?? 0
+  );
+}
+
+export function invalidateSession(db: Database, key: string): void {
+  db.prepare(
+    "INSERT INTO session_runtime (key, generation) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET generation = generation + 1"
+  ).run(key);
+}
+
+/** Fresh Claude context, same durable conversation and attributed history. */
+export function resetByKey(db: Database, key: string): void {
+  db.transaction(() => {
+    invalidateSession(db, key);
+    db.prepare(
+      "UPDATE sessions SET claude_session_id = NULL, turn_count = 0, compact_warned = 0 WHERE key = ?"
+    ).run(key);
+  }).immediate();
 }
 
 export function touchLastUsed(db: Database, id: number): void {
@@ -138,6 +168,11 @@ export function markCompactWarned(db: Database, id: number): void {
 }
 
 export function deleteByKey(db: Database, key: string): boolean {
-  const result = db.prepare("DELETE FROM sessions WHERE key = ?").run(key);
-  return result.changes > 0;
+  return db
+    .transaction(() => {
+      invalidateSession(db, key);
+      const result = db.prepare("DELETE FROM sessions WHERE key = ?").run(key);
+      return result.changes > 0;
+    })
+    .immediate();
 }

@@ -7,7 +7,7 @@
  * Public API is preserved so runner.ts / commands/clear.ts did not have
  * to change. `backupSession` still writes a `session_N.backup` JSON file
  * under `.claude/hermes/` because it is a user-facing artifact (people
- * restore from it by hand); the row is deleted from the DB afterwards.
+ * restore from it by hand); its Claude context is cleared afterwards.
  */
 
 import { readdir, unlink, writeFile } from "fs/promises";
@@ -17,7 +17,7 @@ import { hermesDir, sessionFile } from "./paths";
 import { getSharedDb } from "./state/shared-db";
 import {
   bumpTurn,
-  deleteByKey,
+  resetByKey,
   getByKey,
   markCompactWarned as repoMarkCompactWarned,
   replaceSession,
@@ -84,7 +84,7 @@ export async function peekSession(): Promise<GlobalSession | null> {
 export async function incrementTurn(): Promise<number> {
   const db = await getSharedDb();
   const row = getByKey(db, currentKey());
-  if (!row) return 0;
+  if (!row?.claude_session_id) return 0;
   bumpTurn(db, row.id);
   return row.turn_count + 1;
 }
@@ -93,13 +93,13 @@ export async function incrementTurn(): Promise<number> {
 export async function markCompactWarned(): Promise<void> {
   const db = await getSharedDb();
   const row = getByKey(db, currentKey());
-  if (!row) return;
+  if (!row?.claude_session_id) return;
   repoMarkCompactWarned(db, row.id);
 }
 
 export async function resetSession(): Promise<void> {
   const db = await getSharedDb();
-  deleteByKey(db, currentKey());
+  resetByKey(db, currentKey());
   // Legacy session.json is imported into SQLite on first shared-db open.
   // After a reset the user expects an empty slate, so drop the legacy
   // file too — otherwise the next boot re-imports it and "reset" looks
@@ -109,7 +109,10 @@ export async function resetSession(): Promise<void> {
 
 export async function backupSession(): Promise<string | null> {
   const existing = await findCurrent();
-  if (!existing) return null;
+  if (!existing) {
+    await resetSession();
+    return null;
+  }
 
   let files: string[];
   try {
@@ -126,13 +129,7 @@ export async function backupSession(): Promise<string | null> {
   const backupPath = join(hermesDir(), backupName);
   await writeFile(backupPath, JSON.stringify(existing, null, 2) + "\n", "utf8");
 
-  const db = await getSharedDb();
-  deleteByKey(db, currentKey());
-  // Legacy session.json, if present, has already been imported into
-  // SQLite on shared-db open. After backup the row is gone and we also
-  // remove the legacy file — otherwise the next boot re-imports stale
-  // state and the backup appears to have been ignored.
-  await unlink(sessionFile()).catch(() => {});
+  await resetSession();
 
   return backupName;
 }

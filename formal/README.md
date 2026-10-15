@@ -39,11 +39,14 @@ prove that a subprocess, network call, or arbitrary callback eventually returns.
 
 ## Checked bounds and results
 
-The recorded complete run checked **12 model instances, 230,590 states and
-1,246,335 transitions**, with no invariant violation or nonterminal deadlock.
+The recorded complete run checked **20 model instances, 403,350 states and
+1,769,207 transitions**, with no invariant violation or nonterminal deadlock.
 `results.json` contains per-instance counts, coverage, elapsed time, and negative
-control traces. The real-source replay suite passed **6 tests / 22 assertions**
-using Bun 1.3.4, including the October 6 memory-writer ordering replay. Four checker-diagnostic self-tests also pass: deadlock witness
+control traces. The real-source replay suite passed **10 tests / 47 assertions**
+using Windows Bun 1.3.14. It preserves the original six replays, adds three direct
+SQLite/guard traces, and wraps the existing ownership/generation integration
+suites in an isolated Bun process. That wrapper is **reused coverage**, not a new
+formal proof of those suites. Four checker-diagnostic self-tests also pass: deadlock witness
 accuracy, edge-local failures to already-seen states, initial-state failures, and
 global missing-coverage reporting. Counts exclude mutation searches, which stop
 at their first failure.
@@ -55,6 +58,14 @@ at their first failure.
 | Bridge/runner lane family | 4 calls, all 8 assignments up to 2 keys, modulo key renaming | 32,160 | 98,064 |
 | Destination transfer | 1 transfer, 2 destinations, 1 later control each, lifecycle abort | 2,316 | 8,750 |
 | Conversation cancellation | 3 turns across 2 keys, 1 shared parent signal | 130 | 289 |
+| Durable generations | first turn, reset, explicit generation | 20 | 21 |
+| Durable generations | first turn, forget/recreate, explicit generation | 45 | 51 |
+| Durable generations | existing source, reset, explicit generation | 33 | 45 |
+| Durable generations | existing source, forget/recreate, explicit generation | 68 | 95 |
+| Durable generations | existing source, reset, writer captures generation | 60 | 83 |
+| Durable leases | 2 processes, same key | 8,626 | 21,544 |
+| Durable leases | 2 processes, independent keys | 3,737 | 12,047 |
+| Durable leases | preowned lease + 2 recovery contenders, same key | 160,171 | 488,986 |
 
 Every instance covers all possible orders of its enabled actions. In the budget
 model, caller IDs are assigned in request order: callers are otherwise identical,
@@ -72,9 +83,13 @@ Reference revision: `d66adfdc4195343bc45f4104648ffa3dddb7d97b` (merged PR #4),
 including the transfer-abort correction described below. The October 6 review
 retains the original runtime hashes and adds the unchanged memory file-lock
 protocol to the source correspondence fence.
+The session-generation and cross-process lease extension was manually reviewed
+against the working-tree fixes on base
+`4aa3ffb09a8178515c589059292c68f1c9142573`. Its additional source fences cover
+the modules and runner slices mapped below; original source digests are retained.
 The correspondence is manually reviewed, not mechanically derived or proved.
-`source-manifest.json` hashes the modeled modules and the runner's enqueue
-function. The hash fence detects **review staleness only**, not correctness or
+`source-manifest.json` hashes the reviewed modules and selected runner/reset
+slices. The hash fence detects **review staleness only**, not correctness or
 refinement. The runner slice deliberately excludes unrelated environment policy
 and execution/output changes. If a relevant hash changes, review the abstraction
 again and only then update the recorded digest. Passing unchanged hashes cannot
@@ -99,9 +114,10 @@ abort, and no idle slot while waiters exist. Aborting a running callback does no
 release its slot in the model. It must settle first.
 
 `src/runtime/process.ts` waits for `proc.exited` after interruption, and
-`src/runtime/claude-stream.ts` resolves its wrapper after finalization. These were
-reviewed to motivate the callback-settlement abstraction; their OS process,
-pipe, parser, and status-sink state machines are **not** modeled or hash-fenced.
+`src/runtime/claude-stream.ts` resolves its wrapper after finalization. These
+motivate the callback-settlement abstraction. Their guarded launch boundaries
+are now mapped and hash-fenced for the lease model; OS process termination,
+pipes, parsing, and status sinks remain **outside** the transition systems.
 The budget proof alone cannot prove that live processes always equal slot holders.
 
 ### Lanes: `src/runtime/bridge-queue.ts:enqueueBridge`, `src/runner.ts:enqueue`
@@ -213,6 +229,136 @@ signal nor another turn's controller. Coverage includes simultaneous conversatio
 isolated local cancellation, and parent cancellation reaching both active turns.
 The per-key runner serialization requirement is an explicit precondition.
 
+### Durable generations: `session_models.py:Generations`
+
+`src/state/migrations/006_session_runtime.sql` stores runtime generation and lease
+ownership independently of the optional `sessions` row. Five finite instances
+cover a first turn with no source row, an existing source, reset versus
+forget/recreate, explicit runner generations, and the writer's own capture when
+no generation option is supplied. Each instance has one turn, one extractor,
+one control, and at most one recreation. Source IDs are two distinct identities;
+they are not reused after deletion.
+
+The manually reviewed transition mapping is:
+
+- `capture-turn-generation`: `runner.ts:execClaude` reads `leaseGeneration()`
+  under `withOwnedConversation` / `withSessionLease` before awaiting session use.
+- `persist-turn-immediate`: `runner.ts:persistTurn` checks generation and writes
+  the session context, both messages and turn metadata in **one SQLite immediate
+  transaction**. The model collapses those inseparable successful writes into
+  one durable-history effect. A mismatch writes none of them, even when the
+  first turn has never created a session row.
+- `reset-immediate`: `state/repos/sessions.ts:resetByKey` increments generation
+  and clears Claude context/counters in one immediate transaction. It retains
+  source ID, attributed facts, and transcript. Public workspace/scoped reset and
+  CLI clear adapters were reviewed to reach this boundary. Backup-file creation
+  before reset is not modeled.
+- `forget-immediate` / `recreate-source-immediate`: the scoped forget transaction
+  deletes attributed facts and the session, invalidates its independent runtime
+  generation, then a later `replaceSession` invalidates again and creates a new
+  source ID. Native-file deletion preceding forget is an environment precondition.
+- `capture-source-before-extractor-immediate`: `memory/nudge.ts` resolves the
+  requested source ID/key and its generation before extraction. Missing sources
+  reject immediately. Runner callers retain their explicit earlier generation;
+  standalone callers without one use this captured source generation.
+- `extractor-resolves` and `commit-attributed-fact-immediate` are separate. The
+  latter transaction rechecks source ID and generation before writing facts.
+  Reset or deletion may interleave with the await. A stale attributed operation
+  cannot become an unattributed append to shared memory.
+
+Invariants: `GenerationFencesTurnPersistence`, `GenerationFencesFacts`,
+`StableMemorySourceAttribution`, and `ResetPreservesDurableHistory`. Required
+coverage includes current successful writes, stale turn/fact rejection, first-turn
+invalidation without a session row, preserved reset identity/history, deleted
+sources without fallback, and rejection after a source is recreated. Old facts
+that committed **before** reset intentionally remain durable; the generation
+check governs new commits, not a blanket deletion of historical data.
+
+### Durable leases: `session_models.py:Leases`
+
+The lease graph has two one-shot contenders, or an initially owned lease A plus
+contenders B/C. All processes share one physical workspace/database; instances
+use the same key or two independent keys. `paths.ts:canonicalWorkspace`,
+`state/shared-db.ts` physical database-path identity, and `state/db.ts` busy timeout
+were reviewed as preconditions. Path aliases map to one modeled physical DB.
+The graph does not prove filesystem identity, case/symlink stability, migration
+concurrency, or SQLite itself. The integration wrapper includes real alias and
+independent-process regression traces.
+
+Acquisition is deliberately **not** one atomic acquire/run operation:
+
+1. `acquire-free-immediate` or `read-occupied-immediate` corresponds to the initial
+   SQLite immediate transaction. A busy read captures token, owner PID and child
+   PID; it does not hold the writer lock across a probe.
+2. `native-probe-live/dead/unknown` occurs later and records an observation of that
+   captured ownership. Unknown outcomes reject the acquisition episode. A live
+   observation ends this bounded attempt as waiting; real source waits and loops.
+3. `recover-dead-owner-cas-immediate` rechecks **all three captured ownership
+   fields** using `sameLease`. A stale death snapshot cannot erase a successor.
+   Coverage requires A's death, B's dead snapshot, C acquiring and launching its
+   own registered child, then B's CAS rejection. Recovery reads the current
+   generation after CAS; generation is not part of `sameLease`'s compare predicate.
+4. `spawn-guard-no-permission` creates only the guarded helper selected by
+   `process-tree.ts:taskProcessArgs`. It cannot do useful work yet.
+5. `register-child-cas-immediate` maps `registerLeaseProcess`'s generation/token/
+   owner/child checks and immediate CAS. The graph has one child launch per owner,
+   so registration's optional probe for a **previous** child group is excluded.
+6. `send-permission` maps the abort/deadline check then stdin permission in
+   `process.ts` / `claude-stream.ts`. `lease-child.ts` must receive exactly
+   `run\n` before launching useful work. Owner death before permission closes its
+   pipe; a guarded unregistered child may overlap recovery but never useful work.
+
+`owner-crash` permanently ends that process's code. It never resumes a crashed
+callback. The child group can remain alive, or its leader can exit while
+descendants remain live. Such a recorded group fences recovery until its last
+live member exits. Normal work may also settle after the leader exits while a
+background descendant retains the fence. Finalization has separate native-probe
+and token/owner/child-guarded cleanup transitions; live or unknown results retain
+the token/child and retire the owner PID. Failed native probes never establish
+death. The actual SQL uses owner PID `0` for retirement; the model uses sentinel
+`-2`, which likewise never names a live process.
+
+Clear changes generation and leaves active token/owner/child fields intact. A
+clear **before registration** rejects the old generation's registration. A clear
+**after successful registration** may still let the parent send permission and
+old-generation useful work run: source has no generation recheck at that boundary.
+Its lease remains held; the separate generation model checks rejection of its
+stale session/message/fact writes. This is a compositional argument with explicit
+shared-generation assumptions, not an exhaustively checked graph of both models
+running concurrently.
+
+Invariants: `CrossProcessMutualExclusion` for useful live child groups,
+`LiveChildRetainsFence`, `RecoveryRequiresConfirmedDead`,
+`SnapshotCASPreventsSteal`, `PermissionRequiresDurableRegistration`,
+`GenerationFencesRegistration`, `AbortedWaiterNeverStartsChild`,
+`ClearPreservesLease`, and `UnknownFinalProbeRetainsFence`. Required coverage
+exercises each launch/crash boundary, abort before child creation, live owner and
+orphan rejection, unknown acquisition/finalization probes, stale CAS after a
+successor child starts, background descendants under a retired owner, concurrent
+useful work for independent keys, and clear between registration and permission.
+
+The graph also admits an explicitly labelled **adversarial retired-token cleanup
+command** after supersession. `StaleCleanupPreservesSuccessor` checks the SQL
+token/owner/child guards against that stale input. It is a defensive command
+property; its reachability does **not** assert that a crashed owner can execute a
+later callback. Source additionally rejects inactive AsyncLocalStorage lease
+contexts in `activeLease()`; arbitrary detached callback lifetimes are not modeled.
+
+Each contender makes one acquisition attempt. Live, unknown, stale or aborted
+attempts may finish without admission. There is no state cutoff, retry heuristic,
+or partial-search PASS. Strict rank checks cover this finite episode, including
+crash/child/probe/cleanup transitions. They do not prove eventual admission of a
+real retrying waiter, fair scheduling, or eventual OS process settlement.
+
+The three new direct real-source traces verify (a) reset before a first session
+exists retains the active lease and rejects stale guarded registration, (b) reset
+between registration and permission still permits work while preserving the
+lease/generation separation, and (c) an explicit stale turn generation is rejected
+even when extraction starts **after** reset, while current writes retain their
+original source ID. A missing requested source does not call extraction or touch
+shared notes. All run against temporary SQLite databases and local Bun children;
+they call no real Claude service and send no messages.
+
 ## Assumptions and exclusions
 
 1. JavaScript runs each synchronous segment to completion. Promise callbacks and
@@ -222,21 +368,33 @@ The per-key runner serialization requirement is an explicit precondition.
 2. Native Promise resolution is one-shot. Abort signals are monotonic. The model
    does not prove Bun/Node implementations of Promises, EventTarget,
    AsyncLocalStorage, or AbortSignal.any.
-3. Work can finish successfully or fail; either releases its owned resources through
-   the reviewed `finally`/settlement path. No infinite callback, process that never
-   exits, indefinitely blocked sink, or permanently stalled event loop is represented.
+3. Non-crashed work can finish successfully or fail through the reviewed
+   `finally`/settlement path. The lease graph additionally permits owner crashes
+   with surviving child fences. No infinite callback, process that never exits,
+   indefinitely blocked sink, or permanently stalled event loop is represented.
 4. Eventual progress assumes the scheduler runs enabled work and the external
    creation request eventually resolves or rejects so callers execute `complete`
    or `cancel`. A transfer left unresolved forever can block its lane in real code.
    The bounded model does not establish deadlines or wall-clock responsiveness.
 5. Canonical workspace/source/channel/session keys have stable, correct identities.
-   No authorization, key collision, workspace changes, persistence race, routing
-   metadata, network retry, OS signal delivery, or crash recovery is proved.
+   Bounded lease recovery and generation persistence races are covered only as
+   mapped above. Authorization, key collisions, workspace identity changes,
+   routing metadata, network retries and OS signal delivery are excluded.
 6. Only finite single-shot task populations are modeled. There are no dynamically
    arriving unbounded tasks, nested slot acquisition, or recursive self-enqueueing
    callbacks; those can introduce deadlocks beyond the checked scope.
 7. Source replays are regression tests and support the manual correspondence.
    They do not turn the abstract state checks into a whole-program proof.
+8. Lease PIDs/groups have stable, nonreused identities. A successful native probe
+   is assumed to classify owner/group liveness soundly; unknown results fail
+   closed. The model does not prove POSIX `ps`/zombie classification, Windows CIM
+   ancestry closure, PID reuse behavior, or process reparenting. In particular,
+   current Windows parent rows may omit an already vanished intermediate ancestor
+   of a live descendant; the abstraction does not establish detection in that case.
+9. SQLite committed visibility and writer serialization are assumed. WAL/fsync,
+   power loss, disk corruption, unique-token randomness and database permissions
+   are not proved. Native-memory filesystem mutation and arbitrary callback/
+   extractor content remain outside these protocol graphs.
 
 ## Negative controls
 
@@ -253,7 +411,24 @@ negative control, not a production failure.
 | Remove the tail identity cleanup guard | NoLostLiveTail | enqueue 0/1, abort 0, settle 0, cleanup 0 |
 | Allow `ready` to resolve twice | PromiseFirstResolutionWins | complete destination 0, complete destination 1 |
 | Omit the transfer abort recheck | NoTransferStartAfterLifecycleAbort | complete 0, enter reservation 0, abort lifecycle, start work 0 |
+| Omit turn generation check | GenerationFencesTurnPersistence | capture, reset, persist stale turn |
+| Omit fact generation check | GenerationFencesFacts | capture source, reset, extract, commit stale fact |
+| Fall back when attributed source is missing | StableMemorySourceAttribution | forget, extract without source, shared append |
+| Erase history during reset | ResetPreservesDurableHistory | reset an existing source |
+| Recover a live owner | RecoveryRequiresConfirmedDead | acquire owner, observe live, steal |
+| Recover after unknown native probe | RecoveryRequiresConfirmedDead | acquire owner, unknown probe, recover |
+| Start useful work without acquiring occupied lease | CrossProcessMutualExclusion | owner work, contender bypasses lease |
+| Drop child fence on owner crash | LiveChildRetainsFence | registered useful child, owner crashes |
+| Omit snapshot CAS comparison | SnapshotCASPreventsSteal | dead snapshot, successor acquire, stale recovery |
+| Send permission before registration | PermissionRequiresDurableRegistration | acquire, guard spawn, premature permission |
+| Omit registration generation check | GenerationFencesRegistration | acquire, clear, register stale generation |
+| Omit waiter/launch abort checks | AbortedWaiterNeverStartsChild | abort, acquire, guard spawn |
+| Release active lease during clear | ClearPreservesLease | acquire, clear |
+| Treat unknown final probe as dead | UnknownFinalProbeRetainsFence | recorded child, unknown final probe |
+| Execute unguarded retired-token cleanup | StaleCleanupPreservesSuccessor | retire owner, successor acquire, stale cleanup |
 
-All six controls were detected at the expected invariant. They test both the
+All **21 controls** were detected at the expected invariant. The 15 new controls
+provide semantic RED evidence for the generation/lease requirements; syntax,
+type or missing-fixture failures do not count as RED. They test both the
 checker and sensitivity of these particular invariants; they are not a proof that
 there are no bugs in this custom checker or in its abstraction.

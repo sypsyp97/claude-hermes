@@ -21,6 +21,7 @@ import { readdir, readFile, mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Database } from "../state/db";
 import { listSkills } from "../state/repos/skills";
+import { isApprovedPublication } from "./library";
 
 export interface BridgeResult {
   mirrored: string[];
@@ -83,6 +84,10 @@ export async function syncActiveSkills(
 
     if (skillMd === null || description === null) {
       errors.push({ name, reason: "voyager source missing" });
+      continue;
+    }
+    if (!isApprovedPublication(db, name, skillMd, description)) {
+      errors.push({ name, reason: "skill content changed; approve the current publication before activation" });
       continue;
     }
 

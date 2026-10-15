@@ -15,6 +15,7 @@ from itertools import product
 from pathlib import Path
 import sys
 from time import perf_counter
+from session_models import Generations, Leases
 
 
 def changed(values, index, value):
@@ -420,7 +421,9 @@ def check_sources():
         if actual != entry["sha256"]:
             changed_files.append(path)
     return {"result": "PASS" if not changed_files else "REVIEW_REQUIRED",
-            "reference_commit": manifest["reference_commit"], "changed_files": changed_files}
+            "reference_commit": manifest["reference_commit"],
+            "session_protocol_base_commit": manifest.get("session_protocol_base_commit"),
+            "changed_files": changed_files}
 
 
 def main():
@@ -428,17 +431,31 @@ def main():
     parser.add_argument("--json", action="store_true", help="machine-readable report")
     parser.add_argument("--full", action="store_true", help="explicit exhaustive mode (already the default; no sampling mode)")
     parser.add_argument("--check-source", action="store_true", help="fail on source drift until correspondence is re-reviewed")
-    parser.add_argument("--negative-controls", action="store_true", help="also require six deliberate mutants to fail")
+    parser.add_argument("--negative-controls", action="store_true", help="also require every deliberate mutant to fail")
     args = parser.parse_args()
     # All two-key assignments of four jobs, quotienting key-name symmetry.
     lane_models = [Lanes((0,) + suffix) for suffix in product((0, 1), repeat=3)]
     for model in lane_models:
         if len(set(model.keys)) == 1:
             model.expected_coverage = Lanes.expected_coverage - {"different-keys-concurrent"}
-    models = [Budget(4, 2), Budget(6, 4), *lane_models, Transfers(), Conversations()]
+    session_models = [Generations(require, existing, operation)
+                      for existing in (False, True) for operation in ("reset", "forget")]
+    session_models += [Generations(require, True, "reset", explicit=False)]
+    lease_models = [Leases(require, scenario) for scenario in ("same-key", "independent-keys", "recovery-race")]
+    models = [Budget(4, 2), Budget(6, 4), *lane_models, Transfers(), Conversations(), *session_models, *lease_models]
     results = [explore(model) for model in models]
+    for model, result in zip(models, results):
+        if hasattr(model, "bounds"):
+            result["bounds"] = model.bounds
     report = {"checker": "exhaustive-explicit-state", "source_correspondence": check_sources(),
-              "checks": results, "negative_controls": []}
+              "checks": results, "negative_controls": [],
+              "scope": {
+                  "composition": "Separate finite protocol graphs; concurrent composition is not proved.",
+                  "lease_observation": "Fixed nonreused PIDs; successful native snapshots sound; unknown probes fail closed.",
+                  "lease_progress": "One acquisition attempt per contender; live/unknown/stale observations may end an episode without admission.",
+                  "retired_cleanup": "Adversarial retired-token command; never a resumed crashed process.",
+                  "durability": "Committed SQLite visibility only; no power-loss/fsync, OS signalling, parser, or filesystem proof."
+              }}
     good = all(r["result"] == "PASS" for r in results)
     if args.check_source:
         good &= report["source_correspondence"]["result"] == "PASS"
@@ -448,7 +465,22 @@ def main():
                    (Budget(4, 2, "omit-abort-recheck"), "NoStartAfterObservedAbort"),
                    (Lanes(mutation="unguarded-cleanup"), "NoLostLiveTail"),
                    (Transfers(mutation="resolve-twice"), "PromiseFirstResolutionWins"),
-                   (Transfers(mutation="omit-transfer-abort-recheck"), "NoTransferStartAfterLifecycleAbort")]
+                   (Transfers(mutation="omit-transfer-abort-recheck"), "NoTransferStartAfterLifecycleAbort"),
+                   (Generations(require, mutation="omit-turn-generation"), "GenerationFencesTurnPersistence"),
+                   (Generations(require, mutation="omit-fact-generation"), "GenerationFencesFacts"),
+                   (Generations(require, operation="forget", mutation="missing-source-falls-back"), "StableMemorySourceAttribution"),
+                   (Generations(require, mutation="reset-erases-history"), "ResetPreservesDurableHistory"),
+                   (Leases(require, mutation="steal-live"), "RecoveryRequiresConfirmedDead"),
+                   (Leases(require, mutation="recover-unknown"), "RecoveryRequiresConfirmedDead"),
+                   (Leases(require, mutation="duplicate-useful-work"), "CrossProcessMutualExclusion"),
+                   (Leases(require, mutation="drop-orphan-child-fence"), "LiveChildRetainsFence"),
+                   (Leases(require, "recovery-race", mutation="omit-snapshot-cas"), "SnapshotCASPreventsSteal"),
+                   (Leases(require, mutation="permission-before-registration"), "PermissionRequiresDurableRegistration"),
+                   (Leases(require, mutation="omit-register-generation"), "GenerationFencesRegistration"),
+                   (Leases(require, mutation="omit-waiter-abort"), "AbortedWaiterNeverStartsChild"),
+                   (Leases(require, mutation="clear-releases-lease"), "ClearPreservesLease"),
+                   (Leases(require, mutation="unknown-final-probe-releases"), "UnknownFinalProbeRetainsFence"),
+                   (Leases(require, "recovery-race", mutation="unguarded-retired-cleanup"), "StaleCleanupPreservesSuccessor")]
         for model, expected in mutants:
             result = explore(model)
             result["mutation"] = model.mutation

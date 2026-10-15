@@ -68,22 +68,26 @@ export function setStatus(
   status: SkillStatus,
   promote = status === "active"
 ): void {
-  if (promote) {
-    const maxRunId =
-      db
-        .query<{ max_id: number | null }, [string]>(
-          "SELECT MAX(id) AS max_id FROM skill_runs WHERE skill_name = ?"
-        )
-        .get(name)?.max_id ?? 0;
-    db.prepare("UPDATE skills SET status = ?, promoted_at = ?, promoted_at_run_id = ? WHERE name = ?").run(
-      status,
-      new Date().toISOString(),
-      maxRunId,
-      name
-    );
-  } else {
-    db.prepare("UPDATE skills SET status = ? WHERE name = ?").run(status, name);
-  }
+  db.transaction(() => {
+    if (promote) {
+      const maxRunId =
+        db
+          .query<{ max_id: number | null }, [string]>(
+            "SELECT MAX(id) AS max_id FROM skill_runs WHERE skill_name = ?"
+          )
+          .get(name)?.max_id ?? 0;
+      db.prepare("UPDATE skills SET status = ?, promoted_at = ?, promoted_at_run_id = ? WHERE name = ?").run(
+        status,
+        new Date().toISOString(),
+        maxRunId,
+        name
+      );
+    } else {
+      db.prepare("UPDATE skills SET status = ? WHERE name = ?").run(status, name);
+    }
+    if (status === "active")
+      db.prepare("UPDATE skill_publications SET approved_hash = content_hash WHERE name = ?").run(name);
+  }).immediate();
 }
 
 export function recordVersion(

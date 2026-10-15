@@ -3,6 +3,7 @@
   "source_correspondence": {
     "result": "PASS",
     "reference_commit": "d66adfdc4195343bc45f4104648ffa3dddb7d97b",
+    "session_protocol_base_commit": "4aa3ffb09a8178515c589059292c68f1c9142573",
     "changed_files": []
   },
   "checks": [
@@ -18,7 +19,7 @@
         "abort-during-work",
         "queued"
       ],
-      "seconds": 0.047
+      "seconds": 0.043
     },
     {
       "model": "budget-6-jobs-4-slots",
@@ -32,7 +33,7 @@
         "abort-during-work",
         "queued"
       ],
-      "seconds": 8.775
+      "seconds": 7.719
     },
     {
       "model": "bridge-and-runner-lanes-0000",
@@ -45,7 +46,7 @@
         "aborted-predecessor-settled",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.049
+      "seconds": 0.046
     },
     {
       "model": "bridge-and-runner-lanes-0001",
@@ -59,7 +60,7 @@
         "different-keys-concurrent",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.076
+      "seconds": 0.072
     },
     {
       "model": "bridge-and-runner-lanes-0010",
@@ -73,7 +74,7 @@
         "different-keys-concurrent",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.081
+      "seconds": 0.085
     },
     {
       "model": "bridge-and-runner-lanes-0011",
@@ -87,7 +88,7 @@
         "different-keys-concurrent",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.092
+      "seconds": 0.086
     },
     {
       "model": "bridge-and-runner-lanes-0100",
@@ -101,7 +102,7 @@
         "different-keys-concurrent",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.086
+      "seconds": 0.082
     },
     {
       "model": "bridge-and-runner-lanes-0101",
@@ -115,7 +116,7 @@
         "different-keys-concurrent",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.092
+      "seconds": 0.088
     },
     {
       "model": "bridge-and-runner-lanes-0110",
@@ -129,7 +130,7 @@
         "different-keys-concurrent",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.094
+      "seconds": 0.089
     },
     {
       "model": "bridge-and-runner-lanes-0111",
@@ -143,7 +144,7 @@
         "different-keys-concurrent",
         "old-cleanup-after-new-tail"
       ],
-      "seconds": 0.09
+      "seconds": 0.082
     },
     {
       "model": "destination-transfer",
@@ -159,7 +160,7 @@
         "selected-work",
         "unselected-released"
       ],
-      "seconds": 0.058
+      "seconds": 0.055
     },
     {
       "model": "conversation-cancellation",
@@ -173,7 +174,258 @@
         "parent-cancel-propagated",
         "two-active-conversations"
       ],
-      "seconds": 0.002
+      "seconds": 0.001
+    },
+    {
+      "model": "session-generation-first-reset-explicit",
+      "result": "PASS",
+      "states": 20,
+      "transitions": 21,
+      "terminal_states": 4,
+      "max_shortest_path": 6,
+      "coverage": [
+        "current-fact-attributed",
+        "current-turn-persists",
+        "first-turn-invalidated-without-session",
+        "stale-fact-rejected",
+        "stale-turn-rejected"
+      ],
+      "seconds": 0.0,
+      "bounds": {
+        "turns": 1,
+        "extractors": 1,
+        "controls": 1,
+        "source_initially_exists": false,
+        "operation": "reset",
+        "explicit_turn_generation": true,
+        "recreations": 0
+      }
+    },
+    {
+      "model": "session-generation-first-forget-explicit",
+      "result": "PASS",
+      "states": 45,
+      "transitions": 51,
+      "terminal_states": 9,
+      "max_shortest_path": 7,
+      "coverage": [
+        "current-fact-attributed",
+        "current-turn-persists",
+        "deleted-source-no-shared-fallback",
+        "first-turn-invalidated-without-session",
+        "replacement-rejects-old-extraction",
+        "stale-fact-rejected",
+        "stale-turn-rejected"
+      ],
+      "seconds": 0.0,
+      "bounds": {
+        "turns": 1,
+        "extractors": 1,
+        "controls": 1,
+        "source_initially_exists": false,
+        "operation": "forget",
+        "explicit_turn_generation": true,
+        "recreations": 1
+      }
+    },
+    {
+      "model": "session-generation-existing-reset-explicit",
+      "result": "PASS",
+      "states": 33,
+      "transitions": 45,
+      "terminal_states": 5,
+      "max_shortest_path": 6,
+      "coverage": [
+        "current-fact-attributed",
+        "current-turn-persists",
+        "reset-retains-source-history",
+        "source-id-survives-reset",
+        "stale-fact-rejected",
+        "stale-turn-rejected"
+      ],
+      "seconds": 0.0,
+      "bounds": {
+        "turns": 1,
+        "extractors": 1,
+        "controls": 1,
+        "source_initially_exists": true,
+        "operation": "reset",
+        "explicit_turn_generation": true,
+        "recreations": 0
+      }
+    },
+    {
+      "model": "session-generation-existing-forget-explicit",
+      "result": "PASS",
+      "states": 68,
+      "transitions": 95,
+      "terminal_states": 11,
+      "max_shortest_path": 7,
+      "coverage": [
+        "current-fact-attributed",
+        "current-turn-persists",
+        "deleted-source-no-shared-fallback",
+        "replacement-rejects-old-extraction",
+        "stale-fact-rejected",
+        "stale-turn-rejected"
+      ],
+      "seconds": 0.0,
+      "bounds": {
+        "turns": 1,
+        "extractors": 1,
+        "controls": 1,
+        "source_initially_exists": true,
+        "operation": "forget",
+        "explicit_turn_generation": true,
+        "recreations": 1
+      }
+    },
+    {
+      "model": "session-generation-existing-reset-captured",
+      "result": "PASS",
+      "states": 60,
+      "transitions": 83,
+      "terminal_states": 9,
+      "max_shortest_path": 6,
+      "coverage": [
+        "current-fact-attributed",
+        "current-turn-persists",
+        "reset-retains-source-history",
+        "source-id-survives-reset",
+        "stale-fact-rejected",
+        "stale-turn-rejected"
+      ],
+      "seconds": 0.0,
+      "bounds": {
+        "turns": 1,
+        "extractors": 1,
+        "controls": 1,
+        "source_initially_exists": true,
+        "operation": "reset",
+        "explicit_turn_generation": false,
+        "recreations": 0
+      }
+    },
+    {
+      "model": "durable-lease-same-key",
+      "result": "PASS",
+      "states": 8626,
+      "transitions": 21544,
+      "terminal_states": 534,
+      "max_shortest_path": 21,
+      "coverage": [
+        "abort-before-acquire-no-child",
+        "clear-between-register-and-permission",
+        "clear-keeps-active-lease",
+        "confirmed-dead-recovery",
+        "descendants-live-after-leader-death",
+        "guard-spawn-before-registration",
+        "live-orphan-blocks-recovery",
+        "live-owner-blocks-contender",
+        "old-generation-permission-keeps-fence",
+        "owner-crash-after-permission",
+        "owner-crash-after-registration",
+        "owner-crash-before-registration",
+        "registered-before-permission",
+        "retired-owner-live-descendant-fence",
+        "retired-token-cleanup-preserves-successor",
+        "stale-death-snapshot-after-successor-child",
+        "stale-death-snapshot-cas-rejected",
+        "stale-generation-registration-rejected",
+        "unknown-final-probe-retains-fence",
+        "unknown-probe-rejects"
+      ],
+      "seconds": 0.218,
+      "bounds": {
+        "processes": 2,
+        "physical_workspaces": 1,
+        "keys": 1,
+        "acquisition_attempts_per_contender": 1,
+        "owner_crashes": 1,
+        "clear_operations": 1,
+        "aborts": 1,
+        "preowned_lease": false,
+        "adversarial_retired_token_command": 1
+      }
+    },
+    {
+      "model": "durable-lease-independent-keys",
+      "result": "PASS",
+      "states": 3737,
+      "transitions": 12047,
+      "terminal_states": 105,
+      "max_shortest_path": 19,
+      "coverage": [
+        "abort-before-acquire-no-child",
+        "clear-between-register-and-permission",
+        "clear-keeps-active-lease",
+        "descendants-live-after-leader-death",
+        "guard-spawn-before-registration",
+        "independent-keys-useful-work",
+        "old-generation-permission-keeps-fence",
+        "owner-crash-after-permission",
+        "owner-crash-after-registration",
+        "owner-crash-before-registration",
+        "registered-before-permission",
+        "retired-owner-live-descendant-fence",
+        "stale-generation-registration-rejected",
+        "unknown-final-probe-retains-fence"
+      ],
+      "seconds": 0.132,
+      "bounds": {
+        "processes": 2,
+        "physical_workspaces": 1,
+        "keys": 2,
+        "acquisition_attempts_per_contender": 1,
+        "owner_crashes": 1,
+        "clear_operations": 1,
+        "aborts": 1,
+        "preowned_lease": false,
+        "adversarial_retired_token_command": 1
+      }
+    },
+    {
+      "model": "durable-lease-recovery-race",
+      "result": "PASS",
+      "states": 160171,
+      "transitions": 488986,
+      "terminal_states": 3730,
+      "max_shortest_path": 30,
+      "coverage": [
+        "abort-before-acquire-no-child",
+        "clear-between-register-and-permission",
+        "clear-keeps-active-lease",
+        "confirmed-dead-recovery",
+        "descendants-live-after-leader-death",
+        "guard-spawn-before-registration",
+        "live-orphan-blocks-recovery",
+        "live-owner-blocks-contender",
+        "old-generation-permission-keeps-fence",
+        "owner-crash-after-permission",
+        "owner-crash-after-registration",
+        "owner-crash-before-registration",
+        "registered-before-permission",
+        "retired-owner-live-descendant-fence",
+        "retired-token-cleanup-preserves-successor",
+        "stale-death-snapshot-after-successor-child",
+        "stale-death-snapshot-cas-rejected",
+        "stale-generation-registration-rejected",
+        "three-process-death-snapshot-after-successor-child",
+        "unknown-final-probe-retains-fence",
+        "unknown-probe-rejects"
+      ],
+      "seconds": 5.12,
+      "bounds": {
+        "processes": 3,
+        "physical_workspaces": 1,
+        "keys": 1,
+        "acquisition_attempts_per_contender": 1,
+        "owner_crashes": 1,
+        "clear_operations": 1,
+        "aborts": 1,
+        "preowned_lease": true,
+        "adversarial_retired_token_command": 1
+      }
     }
   ],
   "negative_controls": [
@@ -281,10 +533,288 @@
       "mutation": "omit-transfer-abort-recheck",
       "expected_invariant": "NoTransferStartAfterLifecycleAbort",
       "detected_as_expected": true
+    },
+    {
+      "model": "session-generation-existing-reset-explicit",
+      "result": "FAIL",
+      "invariant": "GenerationFencesTurnPersistence",
+      "states": 10,
+      "transitions": 9,
+      "diagnostic_scope": "trace",
+      "seconds": 0.0,
+      "counterexample": [
+        "capture-turn-generation",
+        "reset-immediate",
+        "persist-turn-immediate"
+      ],
+      "mutation": "omit-turn-generation",
+      "expected_invariant": "GenerationFencesTurnPersistence",
+      "detected_as_expected": true
+    },
+    {
+      "model": "session-generation-existing-reset-explicit",
+      "result": "FAIL",
+      "invariant": "GenerationFencesFacts",
+      "states": 25,
+      "transitions": 33,
+      "diagnostic_scope": "trace",
+      "seconds": 0.0,
+      "counterexample": [
+        "capture-turn-generation",
+        "reset-immediate",
+        "capture-source-before-extractor-immediate",
+        "extractor-resolves",
+        "commit-attributed-fact-immediate"
+      ],
+      "mutation": "omit-fact-generation",
+      "expected_invariant": "GenerationFencesFacts",
+      "detected_as_expected": true
+    },
+    {
+      "model": "session-generation-existing-forget-explicit",
+      "result": "FAIL",
+      "invariant": "StableMemorySourceAttribution",
+      "states": 40,
+      "transitions": 55,
+      "diagnostic_scope": "trace",
+      "seconds": 0.0,
+      "counterexample": [
+        "capture-turn-generation",
+        "forget-immediate",
+        "missing-source-extracts-without-attribution",
+        "extractor-resolves",
+        "append-unattributed-shared-fact"
+      ],
+      "mutation": "missing-source-falls-back",
+      "expected_invariant": "StableMemorySourceAttribution",
+      "detected_as_expected": true
+    },
+    {
+      "model": "session-generation-existing-reset-explicit",
+      "result": "FAIL",
+      "invariant": "ResetPreservesDurableHistory",
+      "states": 3,
+      "transitions": 2,
+      "diagnostic_scope": "trace",
+      "seconds": 0.0,
+      "counterexample": [
+        "reset-immediate"
+      ],
+      "mutation": "reset-erases-history",
+      "expected_invariant": "ResetPreservesDurableHistory",
+      "detected_as_expected": true
+    },
+    {
+      "model": "durable-lease-same-key",
+      "result": "FAIL",
+      "invariant": "RecoveryRequiresConfirmedDead",
+      "states": 98,
+      "transitions": 142,
+      "diagnostic_scope": "trace",
+      "seconds": 0.001,
+      "counterexample": [
+        "acquire-free-immediate(0)",
+        "read-occupied-immediate(1)",
+        "native-probe-live(1)",
+        "recover-dead-owner-cas-immediate(1)"
+      ],
+      "mutation": "steal-live",
+      "expected_invariant": "RecoveryRequiresConfirmedDead",
+      "detected_as_expected": true
+    },
+    {
+      "model": "durable-lease-same-key",
+      "result": "FAIL",
+      "invariant": "RecoveryRequiresConfirmedDead",
+      "states": 100,
+      "transitions": 147,
+      "diagnostic_scope": "trace",
+      "seconds": 0.001,
+      "counterexample": [
+        "acquire-free-immediate(0)",
+        "read-occupied-immediate(1)",
+        "native-probe-unknown(1)",
+        "recover-dead-owner-cas-immediate(1)"
+      ],
+      "mutation": "recover-unknown",
+      "expected_invariant": "RecoveryRequiresConfirmedDead",
+      "detected_as_expected": true
+    },
+    {
+      "model": "durable-lease-same-key",
+      "result": "FAIL",
+      "invariant": "CrossProcessMutualExclusion",
+      "states": 193,
+      "transitions": 289,
+      "diagnostic_scope": "trace",
+      "seconds": 0.003,
+      "counterexample": [
+        "acquire-free-immediate(0)",
+        "spawn-guard-no-permission(0)",
+        "register-child-cas-immediate(0)",
+        "send-permission(0)",
+        "bypass-lease-start-useful-work(1)"
+      ],
+      "mutation": "duplicate-useful-work",
+      "expected_invariant": "CrossProcessMutualExclusion",
+      "detected_as_expected": true
+    },
+    {
+      "model": "durable-lease-same-key",
+      "result": "FAIL",
+      "invariant": "LiveChildRetainsFence",
+      "states": 186,
+      "transitions": 285,
+      "diagnostic_scope": "trace",
+      "seconds": 0.003,
+      "counterexample": [
+        "acquire-free-immediate(0)",
+        "spawn-guard-no-permission(0)",
+        "register-child-cas-immediate(0)",
+        "send-permission(0)",
+        "owner-crash(U)"
+      ],
+      "mutation": "drop-orphan-child-fence",
+      "expected_invariant": "LiveChildRetainsFence",
+      "detected_as_expected": true
+    },
+    {
+      "model": "durable-lease-recovery-race",
+      "result": "FAIL",
+      "invariant": "SnapshotCASPreventsSteal",
+      "states": 1031,
+      "transitions": 2218,
+      "diagnostic_scope": "trace",
+      "seconds": 0.022,
+      "counterexample": [
+        "spawn-guard-no-permission(0)",
+        "read-occupied-immediate(1)",
+        "register-child-cas-immediate(0)",
+        "owner-crash(R)",
+        "native-probe-dead(1)",
+        "recover-dead-owner-cas-immediate(1)"
+      ],
+      "mutation": "omit-snapshot-cas",
+      "expected_invariant": "SnapshotCASPreventsSteal",
+      "detected_as_expected": true
+    },
+    {
+      "model": "durable-lease-same-key",
+      "result": "FAIL",
+      "invariant": "PermissionRequiresDurableRegistration",
+      "states": 35,
+      "transitions": 42,
+      "diagnostic_scope": "trace",
+      "seconds": 0.0,
+      "counterexample": [
+        "acquire-free-immediate(0)",
+        "spawn-guard-no-permission(0)",
+        "send-permission-without-registration(0)"
+      ],
+      "mutation": "permission-before-registration",
+      "expected_invariant": "PermissionRequiresDurableRegistration",
+      "detected_as_expected": true
+    },
+    {
+      "model": "durable-lease-same-key",
+      "result": "FAIL",
+      "invariant": "GenerationFencesRegistration",
+      "states": 75,
+      "transitions": 105,
+      "diagnostic_scope": "trace",
+      "seconds": 0.001,
+      "counterexample": [
+        "acquire-free-immediate(0)",
+        "clear-generation-immediate(key=0)",
+        "spawn-guard-no-permission(0)",
+        "register-child-cas-immediate(0)"
+      ],
+      "mutation": "omit-register-generation",
+      "expected_invariant": "GenerationFencesRegistration",
+      "detected_as_expected": true
+    },
+    {
+      "model": "durable-lease-same-key",
+      "result": "FAIL",
+      "invariant": "AbortedWaiterNeverStartsChild",
+      "states": 26,
+      "transitions": 28,
+      "diagnostic_scope": "trace",
+      "seconds": 0.0,
+      "counterexample": [
+        "abort-waiter(1)",
+        "acquire-free-immediate(1)",
+        "spawn-guard-no-permission(1)"
+      ],
+      "mutation": "omit-waiter-abort",
+      "expected_invariant": "AbortedWaiterNeverStartsChild",
+      "detected_as_expected": true
+    },
+    {
+      "model": "durable-lease-same-key",
+      "result": "FAIL",
+      "invariant": "ClearPreservesLease",
+      "states": 11,
+      "transitions": 12,
+      "diagnostic_scope": "trace",
+      "seconds": 0.0,
+      "counterexample": [
+        "acquire-free-immediate(0)",
+        "clear-generation-immediate(key=0)"
+      ],
+      "mutation": "clear-releases-lease",
+      "expected_invariant": "ClearPreservesLease",
+      "detected_as_expected": true
+    },
+    {
+      "model": "durable-lease-same-key",
+      "result": "FAIL",
+      "invariant": "UnknownFinalProbeRetainsFence",
+      "states": 513,
+      "transitions": 880,
+      "diagnostic_scope": "trace",
+      "seconds": 0.009,
+      "counterexample": [
+        "acquire-free-immediate(1)",
+        "spawn-guard-no-permission(1)",
+        "register-child-cas-immediate(1)",
+        "abort-waiter(1)",
+        "abort-before-permission(1)",
+        "finally-native-probe-unknown(1)"
+      ],
+      "mutation": "unknown-final-probe-releases",
+      "expected_invariant": "UnknownFinalProbeRetainsFence",
+      "detected_as_expected": true
+    },
+    {
+      "model": "durable-lease-recovery-race",
+      "result": "FAIL",
+      "invariant": "StaleCleanupPreservesSuccessor",
+      "states": 531,
+      "transitions": 1061,
+      "diagnostic_scope": "trace",
+      "seconds": 0.011,
+      "counterexample": [
+        "owner-crash(H)",
+        "read-occupied-immediate(1)",
+        "native-probe-dead(1)",
+        "recover-dead-owner-cas-immediate(1)",
+        "adversarial-retired-token-cleanup(0)"
+      ],
+      "mutation": "unguarded-retired-cleanup",
+      "expected_invariant": "StaleCleanupPreservesSuccessor",
+      "detected_as_expected": true
     }
   ],
-  "instance_count": 12,
-  "total_states": 230590,
-  "total_transitions": 1246335,
+  "scope": {
+    "composition": "Separate finite protocol graphs; concurrent composition is not proved.",
+    "lease_observation": "Fixed nonreused PIDs; successful native snapshots sound; unknown probes fail closed.",
+    "lease_progress": "One acquisition attempt per contender; live/unknown/stale observations may end an episode without admission.",
+    "retired_cleanup": "Adversarial retired-token command; never a resumed crashed process.",
+    "durability": "Committed SQLite visibility only; no power-loss/fsync, OS signalling, parser, or filesystem proof."
+  },
+  "instance_count": 20,
+  "total_states": 403350,
+  "total_transitions": 1769207,
   "result": "PASS"
 }

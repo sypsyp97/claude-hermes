@@ -108,3 +108,45 @@ test("release refuses an existing tag targeting an unverified commit", async () 
 test("release accepts an annotated tag targeting the verified commit", async () => {
   expect(await publish(["1.0.3", "1.0.3", "1.0.3"], undefined, undefined, "tested-sha")).toHaveLength(1);
 });
+
+for (const version of [
+  "01.2.3",
+  "1.02.3",
+  "1.2.03",
+  "1.2.3-01",
+  "1.2.3-alpha.01",
+  "1.2.3-alpha..1",
+  "1.2.3\n",
+  "1.2.3\r\n",
+]) {
+  test(`release workflow rejects invalid SemVer ${version} before calling GitHub`, async () => {
+    // getReleaseByTag throws this exact object if validation reaches the API.
+    const apiReached = new Error("unexpected release lookup");
+    let failure: unknown;
+    try {
+      await publish([version, version, version], apiReached);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBe(apiReached);
+  });
+}
+
+for (const [version, prerelease] of [
+  ["1.2.3-rc.1", true],
+  ["1.2.3+build.01", false],
+  ["1.2.3+build-with-hyphen", false],
+  ["1.2.3-rc.1+build-with-hyphen", true],
+] as const) {
+  test(`release workflow publishes ${version} with prerelease=${prerelease}`, async () => {
+    const created = await publish([version, version, version]);
+    expect(created).toEqual([
+      expect.objectContaining({
+        tag_name: `v${version}`,
+        target_commitish: "tested-sha",
+        prerelease,
+      }),
+    ]);
+  });
+}

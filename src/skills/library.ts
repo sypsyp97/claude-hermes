@@ -13,11 +13,13 @@
  * doing an explicit DELETE + INSERT under the skill name.
  */
 
-import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile, appendFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFile, appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getSharedDb } from "../state/shared-db";
 import type { Database } from "../state/db";
+import { getSkill, upsertSkill } from "../state/repos/skills";
 import { validateSkillManifest } from "./validate";
 import { assertSkillPathSegment } from "./path";
 
@@ -105,6 +107,43 @@ export async function writeSkill(
   input: { name: string; description: string; skillMd: string },
   cwd: string = process.cwd(),
 ): Promise<void> {
+  await publishSkill(input, cwd, false);
+}
+
+/** Capture and approval share SQLite's writer lock across processes. */
+export function writeCandidateSkill(
+  input: { name: string; description: string; skillMd: string },
+  cwd: string = process.cwd(),
+): Promise<boolean> {
+  return publishSkill(input, cwd, true);
+}
+
+function contentHash(skillMd: string, description: string): string {
+  const body = Buffer.from(skillMd, "utf8");
+  // Length-frame the actual UTF-8 file bytes to avoid ambiguous boundaries.
+  return createHash("sha256")
+    .update(`${body.length}:`).update(body).update(description).digest("hex");
+}
+
+export function isApprovedPublication(
+  db: Database,
+  name: string,
+  skillMd: string,
+  description: string,
+): boolean {
+  const publication = db.query<{ approved_hash: string | null }, [string]>(
+    "SELECT approved_hash FROM skill_publications WHERE name = ?",
+  ).get(name);
+  // Preserve existing unmanaged skills. Their first managed edit ends this
+  // compatibility exception and requires an explicit approval of those bytes.
+  return !publication || publication.approved_hash === contentHash(skillMd, description);
+}
+
+async function publishSkill(
+  input: { name: string; description: string; skillMd: string },
+  cwd: string,
+  candidateOnly: boolean,
+): Promise<boolean> {
   const validation = validateSkillManifest({
     name: input.name,
     description: input.description,
@@ -117,28 +156,65 @@ export async function writeSkill(
   }
 
   const dir = skillDir(cwd, input.name);
-  await mkdir(dir, { recursive: true });
-
-  await writeFile(join(dir, "SKILL.md"), input.skillMd, "utf8");
-  await writeFile(join(dir, "description.txt"), input.description, "utf8");
-  // Touch trajectory.jsonl as an empty file so the reader never has to
-  // special-case missing-file vs empty-file.
-  if (!existsSync(join(dir, "trajectory.jsonl"))) {
-    await writeFile(join(dir, "trajectory.jsonl"), "", "utf8");
-  }
-
   const db = await getSharedDb(cwd);
+  // Commit an old-content pin before any filesystem mutation. WAL readers can
+  // otherwise see changed files while the first metadata INSERT is uncommitted;
+  // a later SQL failure must not restore the legacy compatibility exception.
+  const eligible = db.transaction(() => {
+    const existing = getSkill(db, input.name);
+    if (candidateOnly && existing && existing.status !== "candidate") return false;
+    const publication = db.query<{ name: string }, [string]>(
+      "SELECT name FROM skill_publications WHERE name = ?",
+    ).get(input.name);
+    if (!publication) {
+      let previousHash: string | null = null;
+      try {
+        previousHash = contentHash(
+          readFileSync(join(dir, "SKILL.md"), "utf8"),
+          readFileSync(join(dir, "description.txt"), "utf8"),
+        );
+      } catch {
+        // Missing/unreadable old files cannot establish a complete publication.
+      }
+      db.prepare(
+        "INSERT INTO skill_publications (name, content_hash, approved_hash) VALUES (?, ?, ?)",
+      ).run(input.name, previousHash, existing?.status === "active" ? previousHash : null);
+    }
+    return true;
+  }).immediate();
+  if (!eligible) return false;
   // Overwrite-safe FTS sync: drop any prior row for this name, then insert
   // the fresh description. Keeps the index in lockstep with disk on every
   // write — Test 16 pins the eviction half of this contract.
-  db.transaction(() => {
+  return db.transaction(() => {
+    const existing = getSkill(db, input.name);
+    if (candidateOnly && existing && existing.status !== "candidate") return false;
+    // No await between the status check, file publication, index update and
+    // registration. setStatus cannot approve a partially published candidate.
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "SKILL.md"), input.skillMd, "utf8");
+    writeFileSync(join(dir, "description.txt"), input.description, "utf8");
+    if (!existsSync(join(dir, "trajectory.jsonl"))) {
+      writeFileSync(join(dir, "trajectory.jsonl"), "", "utf8");
+    }
+    db.prepare(
+      "INSERT INTO skill_publications (name, content_hash) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET content_hash = excluded.content_hash",
+    ).run(input.name, contentHash(input.skillMd, input.description));
     db.prepare("DELETE FROM skill_descriptions_fts WHERE name = ?").run(
       input.name,
     );
     db.prepare(
       "INSERT INTO skill_descriptions_fts (name, description) VALUES (?, ?)",
     ).run(input.name, input.description);
-  })();
+    if (candidateOnly) {
+      upsertSkill(db, {
+        name: input.name,
+        path: `.claude/hermes/skills/${input.name}`,
+        status: "candidate",
+      });
+    }
+    return true;
+  }).immediate();
 }
 
 export async function appendTrajectory(

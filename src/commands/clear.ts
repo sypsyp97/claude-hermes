@@ -3,8 +3,8 @@ import { backupSession } from "../sessions";
 export async function clear() {
   // Do not stop the daemon here: when clear runs inside the daemon's own
   // Claude CLI child, a SIGTERM would kill the process awaiting the reply.
-  // backupSession() already removes the session row, so the daemon's next
-  // turn will transparently create a fresh one.
+  // backupSession() clears the Claude context and invalidates in-flight writes,
+  // retaining durable history for the daemon's next fresh Claude session.
   const backup = await backupSession();
 
   if (backup) {

@@ -26,10 +26,111 @@
     {
       "path": "src/memory/file-lock.ts",
       "sha256": "3a79a3dab61cb44ce4fcd9dfe179c60cae51e3b9be381869a5427b3f252a0292"
+    },
+    {
+      "path": "src/runtime/session-lease.ts",
+      "sha256": "147b00c51de4d5463294c25ae4513f7eb9ad4ae36a58b44a7f964ead65266612"
+    },
+    {
+      "path": "src/runtime/lease-child.ts",
+      "sha256": "408abd1c1d170b44592a84e2a18e4ab8de214e0c30e72df812a441563c9c5520"
+    },
+    {
+      "path": "src/runtime/process-tree.ts",
+      "sha256": "241599f764e29723889559200361dd465458b40b8431026f820c9a559ec6d0f4"
+    },
+    {
+      "path": "src/runtime/process.ts",
+      "sha256": "e69437296c6bf3d8af98bbb5a97fdf5a1d18e386e2dc1282ac9852baa9b30e77"
+    },
+    {
+      "path": "src/runtime/claude-stream.ts",
+      "sha256": "f88e7e14940594b5427792095ce8c811de95592bd7d7cc8e8ada04e205122a4f"
+    },
+    {
+      "path": "src/state/repos/sessions.ts",
+      "sha256": "38b2d57cb7ae214183c4ee8070d640aabe9270d41cd0ec59719a30a24f1c0f3a"
+    },
+    {
+      "path": "src/memory/nudge.ts",
+      "sha256": "fd71734a06e329217005d7039e61444b944d2188e178ffebf0da0ab7d0f63912"
+    },
+    {
+      "path": "src/state/migrations/006_session_runtime.sql",
+      "sha256": "94a4fc28e8edf6cfdae9f9097bb756611725cb9ac2d650f338c103d4323e362f"
+    },
+    {
+      "path": "src/state/db.ts",
+      "sha256": "30b8d2f6562c8241cc71499eb71d19777516b99f2d08160178322358db4a738b"
+    },
+    {
+      "path": "src/state/shared-db.ts",
+      "sha256": "02bc3c22bca939328fdc24dd03af3f3e1bb61775c3fbc9695e6bfdbbef37ef42"
+    },
+    {
+      "path": "src/runtime/session-target.ts",
+      "sha256": "138b541176a1e920ae4f388a421782ec1a2822de73ae80977681f2bff98e9ca9"
+    },
+    {
+      "path": "src/paths.ts",
+      "start": "export function canonicalWorkspace",
+      "end": "export function nativeMemoryDirectory",
+      "sha256": "09acf1ad1282ef5f4c0e267c846ce18c2483333a3f62f378897c16050ed552ae"
+    },
+    {
+      "path": "src/runner.ts",
+      "start": "async function persistTurn(",
+      "end": "function withOwnedConversation<T>",
+      "sha256": "28e36deda9a586695b33efae0b968ed7663e5bfa8fd80cea0988dabac4cd0225"
+    },
+    {
+      "path": "src/runner.ts",
+      "start": "function withOwnedConversation<T>",
+      "end": "function enqueue<T>",
+      "sha256": "662ef526b73e447d5a89cc50d88b382b749f26f621540ac9352339db2ac0e055"
+    },
+    {
+      "path": "src/runner.ts",
+      "start": "  const session = sessionAccess(input, source);",
+      "end": "  const settings = getSettings();",
+      "sha256": "73c00ecd0c5b1ae1ec72dd95ce06751e248e26a20c33cf7a553431842b9541ff"
+    },
+    {
+      "path": "src/runner.ts",
+      "start": "  let persisted: { turnCount: number; warn: boolean } | null = null;",
+      "end": "    if (persisted && isNew)",
+      "sha256": "091a751a6282213e7896ea414b6af06aa3c5f28b3ebb19c196701de7e70dbd51"
+    },
+    {
+      "path": "src/commands/clear.ts",
+      "sha256": "c8101075fc5c1366718ac1b9add4b1c83028d3c34a001d76bc3dd99a97e08260"
+    },
+    {
+      "path": "src/sessions.ts",
+      "start": "export async function resetSession()",
+      "end": "export async function backupSession()",
+      "sha256": "ab18ad11dc3444e59cc1f2d1a9300181284f9c7edfd9a0e7fb8dd0fb1171b18a"
+    },
+    {
+      "path": "src/sessions.ts",
+      "start": "export async function backupSession()",
+      "end": "  return backupName;",
+      "sha256": "c37d38a47b4ce107779f2ec798d939d97600558c893effff854e74d256f87a03"
+    },
+    {
+      "path": "src/sessionManager.ts",
+      "start": "export async function removeThreadSession(",
+      "end": "// Serialize all read-modify-write rewrites",
+      "sha256": "995f84032fe79b4747b7456851ded69bc587c2f5a1ce3f25dbd02369e254dc3c"
     }
   ],
   "reviewed_changes": [
     "All original runtime source hashes match merged PR #4 at d66adfdc4195343bc45f4104648ffa3dddb7d97b.",
-    "Added manual correspondence for the unchanged in-process memory file-lock tail protocol to the non-cancellable subset of the existing finite Lanes model."
-  ]
+    "Added manual correspondence for the unchanged in-process memory file-lock tail protocol to the non-cancellable subset of the existing finite Lanes model.",
+    "Manually mapped durable session-runtime generations, reset/forget/recreate, atomic runner session+message writes, and attributed extraction capture/await/commit to five bounded Generations instances. Session IDs and prior history survive reset; deleted sources never fall back to shared notes.",
+    "Manually mapped session-lease SQLite immediate acquire/read and token-owner-child CAS, native-probe awaits, guarded child registration before permission, fixed-PID crash/orphan fencing, abort and clear boundaries to same-key, independent-key and three-process recovery-race Leases instances. Clear after successful registration may still permit old-generation work; persistence remains generation-fenced.",
+    "Reviewed process.ts and claude-stream.ts launch and settlement call paths, process-tree.ts guard selection, physical workspace/shared DB identity, and public reset/forget adapters. Whole-file fences also cover excluded code; no claim of OS termination, parser, filesystem, PID-reuse, power-loss durability or whole-program refinement.",
+    "Retired-token cleanup is a separately labelled adversarial stale-command property of the SQL/lease guards, not a possible continuation of a crashed owner. Existing original runtime hashes were retained unchanged; new digests record the manually reviewed working-tree fixes on base 4aa3ffb09a8178515c589059292c68f1c9142573."
+  ],
+  "session_protocol_base_commit": "4aa3ffb09a8178515c589059292c68f1c9142573"
 }

@@ -96,7 +96,7 @@ export async function removeThreadSession(source: ThreadSource, threadId: string
     // ON DELETE SET NULL would turn scoped workspace facts into shared facts.
     if (row) db.prepare("DELETE FROM memory_entries WHERE source_session_id = ?").run(row.id);
     deleteByKey(db, threadKey(source, threadId));
-  })();
+  }).immediate();
   // Also strip the entry from the legacy `sessions.json`. Otherwise the
   // importer that runs on every fresh shared-db open would re-insert the
   // just-deleted thread on the next daemon restart. The legacy file can't
@@ -156,7 +156,7 @@ async function rewriteLegacyOnce(threadId: string, cwd: string): Promise<void> {
 export async function incrementThreadTurn(source: ThreadSource, threadId: string): Promise<number> {
   const db = await getSharedDb();
   const row = getByKey(db, threadKey(source, threadId));
-  if (!row) return 0;
+  if (!row?.claude_session_id) return 0;
   bumpTurn(db, row.id);
   return row.turn_count + 1;
 }
@@ -165,7 +165,7 @@ export async function incrementThreadTurn(source: ThreadSource, threadId: string
 export async function markThreadCompactWarned(source: ThreadSource, threadId: string): Promise<void> {
   const db = await getSharedDb();
   const row = getByKey(db, threadKey(source, threadId));
-  if (!row) return;
+  if (!row?.claude_session_id) return;
   repoMarkCompactWarned(db, row.id);
 }
 
