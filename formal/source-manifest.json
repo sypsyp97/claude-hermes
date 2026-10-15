@@ -37,7 +37,7 @@
     },
     {
       "path": "src/runtime/process-tree.ts",
-      "sha256": "241599f764e29723889559200361dd465458b40b8431026f820c9a559ec6d0f4"
+      "sha256": "6d43def9047e8854e3958f12c7a579752a83d79ce323788ce3ae47f6ecc4a644"
     },
     {
       "path": "src/runtime/process.ts",
@@ -130,7 +130,8 @@
     "Manually mapped durable session-runtime generations, reset/forget/recreate, atomic runner session+message writes, and attributed extraction capture/await/commit to five bounded Generations instances. Session IDs and prior history survive reset; deleted sources never fall back to shared notes.",
     "Manually mapped session-lease SQLite immediate acquire/read and token-owner-child CAS, native-probe awaits, guarded child registration before permission, fixed-PID crash/orphan fencing, abort and clear boundaries to same-key, independent-key and three-process recovery-race Leases instances. Clear after successful registration may still permit old-generation work; persistence remains generation-fenced.",
     "Reviewed process.ts and claude-stream.ts launch and settlement call paths, process-tree.ts guard selection, physical workspace/shared DB identity, and public reset/forget adapters. Whole-file fences also cover excluded code; no claim of OS termination, parser, filesystem, PID-reuse, power-loss durability or whole-program refinement.",
-    "Retired-token cleanup is a separately labelled adversarial stale-command property of the SQL/lease guards, not a possible continuation of a crashed owner. Existing original runtime hashes were retained unchanged; new digests record the manually reviewed working-tree fixes on base 4aa3ffb09a8178515c589059292c68f1c9142573."
+    "Retired-token cleanup is a separately labelled adversarial stale-command property of the SQL/lease guards, not a possible continuation of a crashed owner. Existing original runtime hashes were retained unchanged; new digests record the manually reviewed working-tree fixes on base 4aa3ffb09a8178515c589059292c68f1c9142573.",
+    "Manually re-reviewed process-tree.ts Darwin EPERM portability: strict native /bin/ps resolves zero-signal EPERM; TERM/KILL EPERM is dismissed only after a valid snapshot finds no live group member; live permission denial and failed/malformed probes remain typed cleanup failures, including initial TERM. taskProcessArgs and lease registration/permission boundaries are unchanged. Existing finite live/dead/unknown native-probe abstraction, assumptions and graph counts remain unchanged; this fence update is not an OS correctness proof."
   ],
   "session_protocol_base_commit": "4aa3ffb09a8178515c589059292c68f1c9142573"
 }

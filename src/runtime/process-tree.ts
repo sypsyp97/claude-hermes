@@ -22,15 +22,7 @@ export class ProcessTreeCleanupError extends Error {
   }
 }
 
-function liveGroup(pid: number, command = "ps"): boolean {
-  try {
-    process.kill(-pid, 0);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
-    throw error;
-  }
-  // kill(0) also sees orphaned zombies. They cannot execute work, and an
-  // init that does not reap them must not hold the execution slot forever.
+function snapshotGroup(pid: number, command: string): boolean {
   const snapshot = Bun.spawnSync([command, "-axo", "pgid=,stat="]);
   if (snapshot.exitCode !== 0) throw new Error("Could not inspect the owned process group");
   const output = snapshot.stdout.toString().trim();
@@ -41,6 +33,20 @@ function liveGroup(pid: number, command = "ps"): boolean {
     return { group: Number(match[1]), live: !match[2].startsWith("Z") };
   });
   return rows.some((row) => row.group === pid && row.live);
+}
+
+function liveGroup(pid: number, command = "ps"): boolean {
+  try {
+    process.kill(-pid, 0);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return snapshotGroup(pid, "/bin/ps");
+    throw error;
+  }
+  // Zombies cannot execute work. Darwin can report EPERM for a group with
+  // only zombies; a strict native snapshot must distinguish it from live work.
+  return snapshotGroup(pid, command);
 }
 
 /** Only pass a child spawned with detached:true on POSIX. */
@@ -71,11 +77,14 @@ export async function terminateProcessTree(
     try {
       process.kill(-pid, signal);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") return;
+      if (code === "EPERM" && !snapshotGroup(pid, "/bin/ps")) return;
+      throw error;
     }
   };
-  signalGroup("SIGTERM");
   try {
+    signalGroup("SIGTERM");
     const deadline = Date.now() + graceMs;
     while (liveGroup(pid) && Date.now() < deadline) await Bun.sleep(10);
     // The leader may already have exited. Its descendants still own the group.

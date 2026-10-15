@@ -359,6 +359,18 @@ original source ID. A missing requested source does not call extraction or touch
 shared notes. All run against temporary SQLite databases and local Bun children;
 they call no real Claude service and send no messages.
 
+The Darwin portability correction in `process-tree.ts` retains this abstraction.
+Darwin can return `EPERM` for an extant group with no signallable non-zombie
+members: the kernel filters zombies before counting, and the libc wrapper selects
+POSIX error behavior. See Apple's [group-signal implementation](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/kern/kern_sig.c#L1669-L1712)
+and [kill wrapper](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/libsyscall/wrappers/kill.c).
+The runtime therefore resolves a zero-signal `EPERM` through a strict native
+`/bin/ps` snapshot; a TERM/KILL `EPERM` is dismissed only when that snapshot
+confirms no live member. Live-member denial or failed/malformed inspection remains
+a cleanup failure, including an initial TERM failure. This is a reviewed OS
+interpretation boundary, not an additional model guarantee. The finite graphs,
+counts and sound-native-probe assumption are unchanged.
+
 ## Assumptions and exclusions
 
 1. JavaScript runs each synchronous segment to completion. Promise callbacks and
